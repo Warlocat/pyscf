@@ -1,0 +1,351 @@
+#!/usr/bin/env python
+# Copyright 2014-2021 The PySCF Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Author: Qiming Sun <osirpt.sun@gmail.com>
+#
+
+'''
+RCCSD for real integrals
+8-fold permutation symmetry has been used
+(ij|kl) = (ji|kl) = (kl|ij) = ...
+'''
+
+
+import ctypes
+from functools import reduce
+import numpy
+from pyscf import gto
+from pyscf import lib
+from pyscf.lib import logger
+from pyscf import ao2mo
+from pyscf.ao2mo import _ao2mo
+from pyscf.cc import _ccsd, ccsd
+from pyscf.mp.mp2 import get_nocc, get_nmo, get_frozen_mask, get_e_hf, _mo_without_core
+from pyscf import __config__
+
+BLKMIN = getattr(__config__, 'cc_ccsd_blkmin', 4)
+MEMORYMIN = getattr(__config__, 'cc_ccsd_memorymin', 2000)
+
+
+
+def update_amps(mycc, t1, t2, eris):
+    assert (isinstance(eris, ccsd._ChemistsERIs))
+    if isinstance(mycc, pCCSD):
+        variant = 'pccsd'
+    else:
+        variant = 'dcsd'
+
+    time0 = logger.process_clock(), logger.perf_counter()
+    log = logger.Logger(mycc.stdout, mycc.verbose)
+    nocc, nvir = t1.shape
+    fock = eris.fock
+    mo_e_o = eris.mo_energy[:nocc]
+    mo_e_v = eris.mo_energy[nocc:] + mycc.level_shift
+
+    t1new = numpy.zeros_like(t1)
+    t2new = mycc._add_vvvv(t1, t2, eris, t2sym='jiba')
+    t2new *= .5  # *.5 because t2+t2.transpose(1,0,3,2) in the end
+    time1 = log.timer_debug1('vvvv', *time0)
+
+#** make_inter_F
+    fov = fock[:nocc,nocc:].copy()
+    t1new += fov
+
+    foo = fock[:nocc,:nocc] - numpy.diag(mo_e_o)
+    foo += .5 * numpy.einsum('ia,ja->ij', fock[:nocc,nocc:], t1)
+    foo_p = foo.copy()
+
+    fvv = fock[nocc:,nocc:] - numpy.diag(mo_e_v)
+    fvv -= .5 * numpy.einsum('ia,ib->ab', t1, fock[:nocc,nocc:])
+
+    if mycc.incore_complete:
+        fswap = None
+    else:
+        fswap = lib.H5TmpFile()
+    fwVOov, fwVooV = ccsd._add_ovvv_(mycc, t1, t2, eris, fvv, t1new, t2new, fswap)
+    fvv_p = fvv.copy()
+    time1 = log.timer_debug1('ovvv', *time1)
+
+    woooo = numpy.asarray(eris.oooo).transpose(0,2,1,3).copy()
+    woooo_p = woooo.copy()
+
+    unit = nocc**2*nvir*7 + nocc**3 + nocc*nvir**2
+    mem_now = lib.current_memory()[0]
+    max_memory = max(0, mycc.max_memory - mem_now)
+    blksize = min(nvir, max(BLKMIN, int((max_memory*.9e6/8-nocc**4)/unit)))
+    log.debug1('max_memory %d MB,  nocc,nvir = %d,%d  blksize = %d',
+               max_memory, nocc, nvir, blksize)
+
+    for p0, p1 in lib.prange(0, nvir, blksize):
+        wVOov = fwVOov[p0:p1]
+        wVooV = fwVooV[p0:p1]
+        eris_ovoo = eris.ovoo[:,p0:p1]
+        eris_oovv = numpy.empty((nocc,nocc,p1-p0,nvir))
+        def load_oovv(p0, p1):
+            eris_oovv[:] = eris.oovv[:,:,p0:p1]
+        with lib.call_in_background(load_oovv, sync=not mycc.async_io) as prefetch_oovv:
+            #:eris_oovv = eris.oovv[:,:,p0:p1]
+            prefetch_oovv(p0, p1)
+            tmp = numpy.einsum('kc,kcji->ij', 2*t1[:,p0:p1], eris_ovoo)
+            tmp += numpy.einsum('kc,icjk->ij',  -t1[:,p0:p1], eris_ovoo)
+            foo += tmp
+            foo_p += tmp
+            tmp = lib.einsum('la,jaik->lkji', t1[:,p0:p1], eris_ovoo)
+            woooo += tmp + tmp.transpose(1,0,3,2)
+            woooo_p += tmp + tmp.transpose(1,0,3,2)
+            tmp = None
+
+            wVOov -= lib.einsum('jbik,ka->bjia', eris_ovoo, t1)
+            t2new[:,:,p0:p1] += wVOov.transpose(1,2,0,3)
+
+            wVooV += lib.einsum('kbij,ka->bija', eris_ovoo, t1)
+            eris_ovoo = None
+        load_oovv = prefetch_oovv = None
+
+        eris_ovvo = numpy.empty((nocc,p1-p0,nvir,nocc))
+        def load_ovvo(p0, p1):
+            eris_ovvo[:] = eris.ovvo[:,p0:p1]
+        with lib.call_in_background(load_ovvo, sync=not mycc.async_io) as prefetch_ovvo:
+            #:eris_ovvo = eris.ovvo[:,p0:p1]
+            prefetch_ovvo(p0, p1)
+            t1new[:,p0:p1] -= numpy.einsum('jb,jiab->ia', t1, eris_oovv)
+            wVooV -= eris_oovv.transpose(2,0,1,3)
+            wVOov += wVooV*.5  #: bjia + bija*.5
+        load_ovvo = prefetch_ovvo = None
+
+        t2new[:,:,p0:p1] += (eris_ovvo*0.5).transpose(0,3,1,2)
+        eris_voov = eris_ovvo.conj().transpose(1,0,3,2)
+        t1new[:,p0:p1] += 2*numpy.einsum('jb,aijb->ia', t1, eris_voov)
+        eris_ovvo = None
+
+        tmp  = lib.einsum('ic,kjbc->ibkj', t1, eris_oovv)
+        tmp += lib.einsum('bjkc,ic->jbki', eris_voov, t1)
+        t2new[:,:,p0:p1] -= lib.einsum('ka,jbki->jiba', t1, tmp)
+        eris_oovv = tmp = None
+
+        fov[:,p0:p1] += numpy.einsum('kc,aikc->ia', t1, eris_voov) * 2
+        fov[:,p0:p1] -= numpy.einsum('kc,akic->ia', t1, eris_voov)
+
+        tau  = numpy.einsum('ia,jb->ijab', t1[:,p0:p1]*.5, t1)
+        tau += t2[:,:,p0:p1]
+        theta  = tau.transpose(1,0,2,3) * 2
+        theta -= tau
+        fvv -= lib.einsum('cjia,cjib->ab', theta.transpose(2,1,0,3), eris_voov)
+        foo += lib.einsum('aikb,kjab->ij', eris_voov, theta)
+        tau = theta = None
+        if variant == 'dcsd':
+            tau  = numpy.einsum('ia,jb->ijab', t1[:,p0:p1]*.5, t1)
+            tau += t2[:,:,p0:p1] * 0.5 # extra factor for DCSD
+            theta  = tau.transpose(1,0,2,3) * 2
+            theta -= tau
+            fvv_p -= lib.einsum('cjia,cjib->ab', theta.transpose(2,1,0,3), eris_voov)
+            foo_p += lib.einsum('aikb,kjab->ij', eris_voov, theta)
+            tau = theta = None
+        elif variant == 'pccsd':
+            tau  = numpy.einsum('ia,jb->ijab', t1[:,p0:p1]*.5, t1)
+            tau += t2[:,:,p0:p1] * (mycc.p_alpha + 1.0) / 2.0 # extra factor for pCCSD
+            theta  = tau.transpose(1,0,2,3) * 2
+            theta -= tau
+            foo_p += lib.einsum('aikb,kjab->ij', eris_voov, theta)
+
+            tau  = numpy.einsum('ia,jb->ijab', t1[:,p0:p1]*.5, t1)
+            tau += t2[:,:,p0:p1] * mycc.p_beta # extra factor for pCCSD
+            theta  = tau.transpose(1,0,2,3) * 2
+            theta -= tau
+            fvv_p -= lib.einsum('cjia,cjib->ab', theta.transpose(2,1,0,3), eris_voov)
+            tau = theta = None
+
+        tau = numpy.einsum('ia,jb->ijab', t1[:,p0:p1], t1)
+        tau_p = tau.copy()
+        tau += t2[:,:,p0:p1]
+        if variant == 'dcsd':
+            # remove t2 for DCSD
+            pass
+        elif variant == 'pccsd':
+            tau_p += t2[:,:,p0:p1] * mycc.p_alpha # extra factor for pCCSD
+        woooo += lib.einsum('ijab,aklb->ijkl', tau, eris_voov)
+        woooo_p += lib.einsum('ijab,aklb->ijkl', tau_p, eris_voov)
+        tau = tau_p = None
+
+        def update_wVooV(q0, q1, tau):
+            wVooV[:] += lib.einsum('bkic,jkca->bija', eris_voov[:,:,:,q0:q1], tau)
+        def update_wVooV_p(q0, q1, tau):
+            if variant == 'dcsd':
+                pass
+                # wVooV[:] += lib.einsum('bkic,jkca->bija', eris_voov[:,:,:,q0:q1], tau) * 0.0
+            elif variant == 'pccsd':
+                wVooV[:] += lib.einsum('bkic,jkca->bija', eris_voov[:,:,:,q0:q1], tau) * mycc.p_beta
+        with lib.call_in_background(update_wVooV, sync=not mycc.async_io) as update_wVooV:
+            for q0, q1 in lib.prange(0, nvir, blksize):
+                tau  = t2[:,:,q0:q1] * .5
+                update_wVooV_p(q0, q1, tau)
+                tau = numpy.einsum('ia,jb->ijab', t1[:,q0:q1], t1)
+                update_wVooV(q0, q1, tau)
+        tau = update_wVooV = update_wVooV_p = None
+        def update_t2(q0, q1, tmp):
+            t2new[:,:,q0:q1] += tmp.transpose(2,0,1,3)
+            tmp *= .5
+            t2new[:,:,q0:q1] += tmp.transpose(0,2,1,3)
+        with lib.call_in_background(update_t2, sync=not mycc.async_io) as update_t2:
+            for q0, q1 in lib.prange(0, nvir, blksize):
+                tmp = lib.einsum('jkca,ckib->jaib', t2[:,:,p0:p1,q0:q1], wVooV)
+                #:t2new[:,:,q0:q1] += tmp.transpose(2,0,1,3)
+                #:tmp *= .5
+                #:t2new[:,:,q0:q1] += tmp.transpose(0,2,1,3)
+                update_t2(q0, q1, tmp)
+                tmp = None
+
+        wVOov += eris_voov
+        eris_VOov = eris_voov.copy()
+        if variant != 'dcsd':
+            eris_VOov -= .5 * eris_voov.transpose(0,2,1,3)
+        eris_voov = None
+        
+        def update_wVOov(q0, q1, tau):
+            wVOov[:,:,:,q0:q1] += .5 * lib.einsum('aikc,kcjb->aijb', eris_VOov, tau)
+        def update_wVOov_p(q0, q1, tau):
+            if variant == 'dcsd':
+                wVOov[:,:,:,q0:q1] += .5 * lib.einsum('aikc,kcjb->aijb', eris_VOov, tau)
+            elif variant == 'pccsd':
+                wVOov[:,:,:,q0:q1] += .5 * lib.einsum('aikc,kcjb->aijb', eris_VOov, tau) * mycc.p_beta
+        with lib.call_in_background(update_wVOov, sync=not mycc.async_io) as update_wVOov:
+            for q0, q1 in lib.prange(0, nvir, blksize):
+                tau  = t2[:,:,q0:q1].transpose(1,3,0,2) * 2
+                tau -= t2[:,:,q0:q1].transpose(0,3,1,2)
+                update_wVOov_p(q0, q1, tau)
+                tau  = -numpy.einsum('ia,jb->ibja', t1[:,q0:q1]*2, t1)
+                #:wVOov[:,:,:,q0:q1] += .5 * lib.einsum('aikc,kcjb->aijb', eris_VOov, tau)
+                update_wVOov(q0, q1, tau)
+                tau = None
+        def update_t2(q0, q1, theta):
+            t2new[:,:,q0:q1] += lib.einsum('kica,ckjb->ijab', theta, wVOov)
+        with lib.call_in_background(update_t2, sync=not mycc.async_io) as update_t2:
+            for q0, q1 in lib.prange(0, nvir, blksize):
+                theta  = t2[:,:,p0:p1,q0:q1] * 2
+                theta -= t2[:,:,p0:p1,q0:q1].transpose(1,0,2,3)
+                update_t2(q0, q1, theta)
+                theta = None
+        eris_VOov = wVOov = wVooV = update_wVOov = update_wVOov_p = None
+        time1 = log.timer_debug1('voov [%d:%d]'%(p0, p1), *time1)
+    fwVOov = fwVooV = fswap = None
+
+    for p0, p1 in lib.prange(0, nvir, blksize):
+        theta = t2[:,:,p0:p1].transpose(1,0,2,3) * 2 - t2[:,:,p0:p1]
+        t1new += numpy.einsum('jb,ijba->ia', fov[:,p0:p1], theta)
+        t1new -= lib.einsum('jbki,kjba->ia', eris.ovoo[:,p0:p1], theta)
+
+        tau = numpy.einsum('ia,jb->ijab', t1[:,p0:p1], t1)
+        t2new[:,:,p0:p1] += .5 * lib.einsum('ijkl,klab->ijab', woooo, tau)
+        t2new[:,:,p0:p1] += .5 * lib.einsum('ijkl,klab->ijab', woooo_p, t2[:,:,p0:p1])
+        theta = tau = None
+
+    ft_ij = foo_p + numpy.einsum('ja,ia->ij', .5*t1, fov)
+    ft_ab = fvv_p - numpy.einsum('ia,ib->ab', .5*t1, fov)
+    t2new += lib.einsum('ijac,bc->ijab', t2, ft_ab)
+    t2new -= lib.einsum('ki,kjab->ijab', ft_ij, t2)
+
+    eia = mo_e_o[:,None] - mo_e_v
+    t1new += numpy.einsum('ib,ab->ia', t1, fvv)
+    t1new -= numpy.einsum('ja,ji->ia', t1, foo)
+    t1new /= eia
+
+    #: t2new = t2new + t2new.transpose(1,0,3,2)
+    for i in range(nocc):
+        if i > 0:
+            t2new[i,:i] += t2new[:i,i].transpose(0,2,1)
+            t2new[i,:i] /= lib.direct_sum('a,jb->jab', eia[i], eia[:i])
+            t2new[:i,i] = t2new[i,:i].transpose(0,2,1)
+        t2new[i,i] = t2new[i,i] + t2new[i,i].T
+        t2new[i,i] /= lib.direct_sum('a,b->ab', eia[i], eia[i])
+
+    time0 = log.timer_debug1('update t1 t2', *time0)
+    return t1new, t2new
+
+
+class DCSD(ccsd.CCSD):
+    __doc__ = ccsd.CCSD.__doc__
+
+    def solve_lambda(self, t1=None, t2=None, l1=None, l2=None, eris=None):
+        raise NotImplementedError
+
+    def ccsd_t(self, t1=None, t2=None, eris=None):
+        raise NotImplementedError
+
+    def make_rdm1(self, t1=None, t2=None, l1=None, l2=None, ao_repr=False,
+                  with_frozen=True, with_mf=True):
+        raise NotImplementedError
+
+    def make_rdm2(self, t1=None, t2=None, l1=None, l2=None, ao_repr=False,
+                  with_frozen=True, with_dm1=True):
+        raise NotImplementedError
+
+    def nuc_grad_method(self):
+        raise NotImplementedError
+    
+    update_amps = update_amps
+
+class pCCSD(DCSD):
+    __doc__ = ccsd.CCSD.__doc__
+    p_alpha = -1.0
+    p_beta = 1.0
+    def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None, alpha=-1.0, beta=1.0):
+        super().__init__(mf, frozen, mo_coeff, mo_occ)
+        self.p_alpha = alpha
+        self.p_beta = beta
+
+if __name__ == '__main__':
+    from pyscf import scf
+    mol = gto.Mole()
+    mol.atom = '''
+    O
+    H  1  5.0
+    H  1  5.0  2 107.6
+'''
+    mol.unit = "Bohr"
+    mol.basis = 'cc-pvdz'
+    mol.build()
+    rhf = scf.RHF(mol)
+    rhf.scf()
+    mcc = DCSD(rhf)
+    mcc.kernel()
+    assert abs(mcc.e_tot - -75.90105741102494) < 1e-7
+    mcc = pCCSD(rhf)
+    mcc.kernel()
+    assert abs(mcc.e_tot - -75.89848268554668) < 1e-7
+
+    # recover CCSD
+    mccp = pCCSD(rhf)
+    mccp.p_alpha = 1.0
+    mccp.p_beta =  1.0
+    mccp.kernel()
+    mcc = ccsd.CCSD(rhf)
+    mcc.kernel()
+    assert abs(mcc.e_tot - mccp.e_tot) < 1e-7
+
+    # exact for two-electron system
+    mol = gto.Mole()
+    mol.atom = 'H 0 0 0; H 0 0 1.5'
+    mol.basis = "ccpvdz"
+    mol.unit = "Bohr"
+    mol.build()
+    rhf = scf.RHF(mol).run()
+    mdc = DCSD(rhf)
+    mdc.kernel()
+    mpcc = pCCSD(rhf)
+    mpcc.kernel()
+    mcc = ccsd.CCSD(rhf)
+    mcc.kernel() 
+    assert abs(mcc.e_tot - mdc.e_tot) < 1e-7
+    assert abs(mcc.e_tot - mpcc.e_tot) < 1e-7
