@@ -184,12 +184,11 @@ def update_amps(mycc, t1, t2, eris):
         def update_wVooV_p(q0, q1, tau):
             if variant == 'dcsd':
                 pass
-                # wVooV[:] += lib.einsum('bkic,jkca->bija', eris_voov[:,:,:,q0:q1], tau) * 0.0
             elif variant == 'pccsd':
                 wVooV[:] += lib.einsum('bkic,jkca->bija', eris_voov[:,:,:,q0:q1], tau) * mycc.p_beta
         with lib.call_in_background(update_wVooV, sync=not mycc.async_io) as update_wVooV:
             for q0, q1 in lib.prange(0, nvir, blksize):
-                tau  = t2[:,:,q0:q1] * .5
+                tau = t2[:,:,q0:q1] * .5
                 update_wVooV_p(q0, q1, tau)
                 tau = numpy.einsum('ia,jb->ijab', t1[:,q0:q1], t1)
                 update_wVooV(q0, q1, tau)
@@ -201,23 +200,20 @@ def update_amps(mycc, t1, t2, eris):
         with lib.call_in_background(update_t2, sync=not mycc.async_io) as update_t2:
             for q0, q1 in lib.prange(0, nvir, blksize):
                 tmp = lib.einsum('jkca,ckib->jaib', t2[:,:,p0:p1,q0:q1], wVooV)
-                #:t2new[:,:,q0:q1] += tmp.transpose(2,0,1,3)
-                #:tmp *= .5
-                #:t2new[:,:,q0:q1] += tmp.transpose(0,2,1,3)
                 update_t2(q0, q1, tmp)
                 tmp = None
 
         wVOov += eris_voov
+        eris_VOov_j = eris_voov.copy()
         eris_VOov = eris_voov.copy()
-        if variant != 'dcsd':
-            eris_VOov -= .5 * eris_voov.transpose(0,2,1,3)
+        eris_VOov -= .5 * eris_voov.transpose(0,2,1,3)
         eris_voov = None
         
         def update_wVOov(q0, q1, tau):
             wVOov[:,:,:,q0:q1] += .5 * lib.einsum('aikc,kcjb->aijb', eris_VOov, tau)
         def update_wVOov_p(q0, q1, tau):
             if variant == 'dcsd':
-                wVOov[:,:,:,q0:q1] += .5 * lib.einsum('aikc,kcjb->aijb', eris_VOov, tau)
+                wVOov[:,:,:,q0:q1] += .5 * lib.einsum('aikc,kcjb->aijb', eris_VOov_j, tau)
             elif variant == 'pccsd':
                 wVOov[:,:,:,q0:q1] += .5 * lib.einsum('aikc,kcjb->aijb', eris_VOov, tau) * mycc.p_beta
         with lib.call_in_background(update_wVOov, sync=not mycc.async_io) as update_wVOov:
@@ -226,7 +222,6 @@ def update_amps(mycc, t1, t2, eris):
                 tau -= t2[:,:,q0:q1].transpose(0,3,1,2)
                 update_wVOov_p(q0, q1, tau)
                 tau  = -numpy.einsum('ia,jb->ibja', t1[:,q0:q1]*2, t1)
-                #:wVOov[:,:,:,q0:q1] += .5 * lib.einsum('aikc,kcjb->aijb', eris_VOov, tau)
                 update_wVOov(q0, q1, tau)
                 tau = None
         def update_t2(q0, q1, theta):
@@ -305,6 +300,29 @@ class pCCSD(DCSD):
         self.p_alpha = alpha
         self.p_beta = beta
 
+class DCD(DCSD):
+    def update_amps(self, t1, t2, eris):
+        t1, t2 = update_amps(self, t1, t2, eris)
+        return numpy.zeros_like(t1), t2
+
+    def kernel(self, t2=None, eris=None):
+        nocc = self.nocc
+        nvir = self.nmo - nocc
+        t1 = numpy.zeros((nocc, nvir))
+        DCSD.kernel(self, t1, t2, eris)
+        return self.e_corr, self.t2
+class pCCD(pCCSD):
+    def update_amps(self, t1, t2, eris):
+        t1, t2 = update_amps(self, t1, t2, eris)
+        return numpy.zeros_like(t1), t2
+    
+    def kernel(self, t2=None, eris=None):
+        nocc = self.nocc
+        nvir = self.nmo - nocc
+        t1 = numpy.zeros((nocc, nvir))
+        pCCSD.kernel(self, t1, t2, eris)
+        return self.e_corr, self.t2
+
 if __name__ == '__main__':
     from pyscf import scf
     mol = gto.Mole()
@@ -320,7 +338,7 @@ if __name__ == '__main__':
     rhf.scf()
     mcc = DCSD(rhf)
     mcc.kernel()
-    assert abs(mcc.e_tot - -75.90105741102494) < 1e-7
+    assert abs(mcc.e_tot - -75.90048871511547) < 1e-7
     mcc = pCCSD(rhf)
     mcc.kernel()
     assert abs(mcc.e_tot - -75.89848268554668) < 1e-7
