@@ -215,7 +215,7 @@ def update_amps(cc, t1, t2, eris):
         tmp = einsum('imae,mbej->ijab', t2, tmp1)
         tmp = tmp - tmp.transpose(1,0,2,3)
         Dtmp = tmp - tmp.transpose(0,1,3,2)
-        t2new += (0.5+0.5*cc.p_alpha)*Atmp + cc.p_alpha*Btmp + cc.p_beta*Ctmp + cc.p_beta*Dtmp
+        t2new += (0.5+0.5*cc.p_mu)*Atmp + cc.p_mu*Btmp + cc.p_sigma*Ctmp + cc.p_sigma*Dtmp
     else: # GDCSD
         tmp1 = -0.5*einsum('jnfb,mnef->mbej', t2, cc.oovv_phys)
         tmp = einsum('imae,mbej->ijab', t2, tmp1)
@@ -240,14 +240,14 @@ class GDCSD(gccsd.GCCSD):
         self.oovv_phys = _make_eris_phys_incore(self).oovv
 
 class pGCCSD(gccsd.GCCSD):
-    p_alpha = -1.0
-    p_beta = 1.0
-    def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None, alpha=None, beta=None):
+    p_mu = -1.0
+    p_sigma = 1.0
+    def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None, mu=None, sigma=None):
         super().__init__(mf, frozen, mo_coeff, mo_occ)
-        if alpha is not None:
-            self.p_alpha = alpha
-        if beta is not None:
-            self.p_beta = beta
+        if mu is not None:
+            self.p_mu = mu
+        if sigma is not None:
+            self.p_sigma = sigma
     update_amps = update_amps
 
 class GDCD(GDCSD):
