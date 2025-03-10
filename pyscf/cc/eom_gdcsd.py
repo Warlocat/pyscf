@@ -23,7 +23,7 @@ from pyscf import scf
 from pyscf.lib import logger
 from pyscf.cc import ccsd, gdcsd
 from pyscf.cc import gintermediates as imd
-from pyscf.cc import eom_rccsd, eom_gccsd
+from pyscf.cc import eom_gccsd
 from pyscf import __config__
 
 #einsum = np.einsum
@@ -91,30 +91,152 @@ def Wovvo_p(t1, t2, eris, delta, eris_oovv_phys = None):
     Wmbej += eris_ovvo
     return Wmbej
 
-def eeccsd_matvec(eom, vector, imds=None, diag=None):
-    # Ref: Wang, Tu, and Wang, J. Chem. Theory Comput. 10, 5567 (2014) Eqs.(9)-(10)
-    # Note: Last line in Eq. (10) is superfluous.
-    # See, e.g. Gwaltney, Nooijen, and Barlett, Chem. Phys. Lett. 248, 189 (1996)
+########################################
+# EOM-IP-DCSD
+########################################
+
+def ipccsd_matvec(eom, vector, imds=None, diag=None):
+    # Derived from EOMEE
     if imds is None: imds = eom.make_imds()
     nocc = eom.nocc
     nmo = eom.nmo
     r1, r2 = eom.vector_to_amplitudes(vector, nmo, nocc)
 
+    # Eq. (8)
+    Hr1 = -np.einsum('mi,m->i', imds.Foo, r1)
+    Hr1 += np.einsum('me,mie->i', imds.Fov, r2)
+    Hr1 += -0.5*np.einsum('nmie,mne->i', imds.Wooov, r2)
     # Eq. (9)
+    Hr2 =  lib.einsum('ae,ije->ija', imds.Fvv_p, r2)
+    tmp1 = lib.einsum('mi,mja->ija', imds.Foo_p, r2)
+    Hr2 -= tmp1 - tmp1.transpose(1,0,2)
+    Hr2 -= np.einsum('maji,m->ija', imds.Wovoo, r1)
+    Hr2 += 0.5*lib.einsum('mnij,mna->ija', imds.Woooo_p, r2)
+    tmp2 = lib.einsum('maei,mje->ija', imds.Wovvo_p, r2)
+    Hr2 += tmp2 - tmp2.transpose(1,0,2)
+    Hr2 += 0.5*lib.einsum('mnef,mnf,ijae->ija', imds.Woovv, r2, imds.t2)*imds.p_alpha
+
+    vector = eom.amplitudes_to_vector(Hr1, Hr2)
+    return vector
+
+def ipccsd_diag(eom, imds=None):
+    if imds is None: imds = eom.make_imds()
+    t1, t2 = imds.t1, imds.t2
+    nocc, nvir = t1.shape
+
+    Hr1 = -np.diag(imds.Foo)
+    Hr2 = np.zeros((nocc,nocc,nvir), dtype=t1.dtype)
+    for i in range(nocc):
+        for j in range(nocc):
+            for a in range(nvir):
+                Hr2[i,j,a] += imds.Fvv_p[a,a]
+                Hr2[i,j,a] += -imds.Foo_p[i,i]
+                Hr2[i,j,a] += -imds.Foo_p[j,j]
+                Hr2[i,j,a] += 0.5*(imds.Woooo_p[i,j,i,j]-imds.Woooo_p[j,i,i,j])
+                Hr2[i,j,a] += imds.Wovvo[i,a,a,i] * imds.p_beta
+                Hr2[i,j,a] += imds.Wovvo[j,a,a,j] * imds.p_beta
+                Hr2[i,j,a] += 0.5*(np.dot(imds.Woovv[i,j,:,a], t2[i,j,a,:]) -
+                                   np.dot(imds.Woovv[j,i,:,a], t2[i,j,a,:]))
+
+    vector = eom.amplitudes_to_vector(Hr1, Hr2)
+    return vector
+
+class EOMIP(eom_gccsd.EOMIP):
+    matvec = ipccsd_matvec
+    get_diag = ipccsd_diag
+
+    def make_imds(self, eris=None):
+        imds = _IMDS(self._cc, eris)
+        imds.make_ip()
+        return imds
+
+########################################
+# EOM-EA-DCSD
+########################################
+
+def eaccsd_matvec(eom, vector, imds=None, diag=None):
+    # Ref: Nooijen and Bartlett, J. Chem. Phys. 102, 3629 (1994) Eqs.(30)-(31)
+    if imds is None: imds = eom.make_imds()
+    nocc = eom.nocc
+    nmo = eom.nmo
+    r1, r2 = eom.vector_to_amplitudes(vector, nmo, nocc)
+
+    # Eq. (30)
+    Hr1  = np.einsum('ac,c->a', imds.Fvv, r1)
+    Hr1 += np.einsum('ld,lad->a', imds.Fov, r2)
+    Hr1 += 0.5*np.einsum('alcd,lcd->a', imds.Wvovv, r2)
+    # Eq. (31)
+    Hr2 = np.einsum('abcj,c->jab', imds.Wvvvo, r1)
+    tmp1 = lib.einsum('ac,jcb->jab', imds.Fvv_p, r2)
+    Hr2 += tmp1 - tmp1.transpose(0,2,1)
+    Hr2 -= lib.einsum('lj,lab->jab', imds.Foo_p, r2)
+    tmp2 = lib.einsum('lbdj,lad->jab', imds.Wovvo_p, r2)
+    Hr2 += tmp2 - tmp2.transpose(0,2,1)
+    Hr2 += 0.5*lib.einsum('abcd,jcd->jab', imds.Wvvvv_p, r2)
+    Hr2 -= 0.5*lib.einsum('klcd,lcd,kjab->jab', imds.Woovv, r2, imds.t2)*imds.p_beta
+
+    vector = eom.amplitudes_to_vector(Hr1, Hr2)
+    return vector
+
+def eaccsd_diag(eom, imds=None):
+    if imds is None: imds = eom.make_imds()
+    t1, t2 = imds.t1, imds.t2
+    nocc, nvir = t1.shape
+
+    Hr1 = np.diag(imds.Fvv)
+    Hr2 = np.zeros((nocc,nvir,nvir),dtype=t1.dtype)
+    for a in range(nvir):
+        _Wvvvva = np.array(imds.Wvvvv_p[a])
+        for b in range(a):
+            for j in range(nocc):
+                Hr2[j,a,b] += imds.Fvv_p[a,a]
+                Hr2[j,a,b] += imds.Fvv_p[b,b]
+                Hr2[j,a,b] += -imds.Foo_p[j,j]
+                Hr2[j,a,b] += imds.Wovvo[j,b,b,j] * imds.p_alpha
+                Hr2[j,a,b] += imds.Wovvo[j,a,a,j] * imds.p_alpha
+                Hr2[j,a,b] += 0.5*(_Wvvvva[b,a,b]-_Wvvvva[b,b,a])
+                Hr2[j,a,b] -= 0.5*(np.dot(imds.Woovv[:,j,a,b], t2[:,j,a,b]) -
+                                   np.dot(imds.Woovv[:,j,b,a], t2[:,j,a,b]))
+
+    vector = eom.amplitudes_to_vector(Hr1, Hr2)
+    return vector
+
+class EOMEA(eom_gccsd.EOMEA):
+    matvec = eaccsd_matvec
+    get_diag = eaccsd_diag
+
+    def make_imds(self, eris=None):
+        imds = _IMDS(self._cc, eris)
+        imds.make_ea()
+        return imds
+
+########################################
+# EOM-EE-DCSD
+########################################
+
+def eeccsd_matvec(eom, vector, imds=None, diag=None):
+    # Ref: J. Chem. Phys. 146, 144104 (2017)
+    # Almost the same as the normal EOM-CCSD but with 
+    # prefactors for terms in r2 -> Hr2
+    if imds is None: imds = eom.make_imds()
+    nocc = eom.nocc
+    nmo = eom.nmo
+    r1, r2 = eom.vector_to_amplitudes(vector, nmo, nocc)
+
     Hr1  = lib.einsum('ae,ie->ia', imds.Fvv, r1)
     Hr1 -= lib.einsum('mi,ma->ia', imds.Foo, r1)
     Hr1 += lib.einsum('me,imae->ia', imds.Fov, r2)
     Hr1 += lib.einsum('maei,me->ia', imds.Wovvo, r1)
     Hr1 -= 0.5*lib.einsum('mnie,mnae->ia', imds.Wooov, r2)
     Hr1 += 0.5*lib.einsum('amef,imef->ia', imds.Wvovv, r2)
-    # Eq. (10)
+
     tmpab = lib.einsum('be,ijae->ijab', imds.Fvv_p, r2)
-    tmp = 0.5*lib.einsum('mnef,mnbf->eb', imds.Woovv, r2) *imds.p_alpha
+    tmp = 0.5*lib.einsum('mnef,mnbf->eb', imds.Woovv, r2)*imds.p_alpha
     tmpab -= lib.einsum('eb,ijae->ijab', tmp, imds.t2)
     tmpab -= lib.einsum('mbij,ma->ijab', imds.Wovoo, r1)
     tmpab -= lib.einsum('amef,ijfb,me->ijab', imds.Wvovv, imds.t2, r1)
     tmpij  = lib.einsum('mj,imab->ijab', -imds.Foo_p, r2)
-    tmp = 0.5*lib.einsum('mnef,jnef->mj', imds.Woovv, r2) *imds.p_beta
+    tmp = 0.5*lib.einsum('mnef,jnef->mj', imds.Woovv, r2)*imds.p_beta
     tmpij -= lib.einsum('mj,imab->ijab', tmp, imds.t2)
     tmpij += lib.einsum('abej,ie->ijab', imds.Wvvvo, r1)
     tmpij += lib.einsum('mnie,njab,me->ijab', imds.Wooov, imds.t2, r1)
@@ -145,8 +267,8 @@ def eeccsd_diag(eom, imds=None):
     for a in range(nvir):
         tmp = 0.5*(np.einsum('ijeb,ijbe->ijb', imds.Woovv, t2) -
                    np.einsum('jieb,ijbe->ijb', imds.Woovv, t2))
-        Hr2[:,:,:,a] += imds.Fvv_p[a,a] + tmp
-        Hr2[:,:,a,:] += imds.Fvv_p[a,a] + tmp
+        Hr2[:,:,:,a] += imds.Fvv_p[a,a] + tmp * imds.p_alpha
+        Hr2[:,:,a,:] += imds.Fvv_p[a,a] + tmp * imds.p_alpha
         _Wvvvva = np.array(imds.Wvvvv_p[a])
         for b in range(a):
             Hr2[:,:,a,b] += 0.5*(_Wvvvva[b,a,b]-_Wvvvva[b,b,a])
@@ -159,17 +281,13 @@ def eeccsd_diag(eom, imds=None):
     for i in range(nocc):
         tmp = 0.5*(np.einsum('kjab,jkab->jab', imds.Woovv, t2) -
                    np.einsum('kjba,jkab->jab', imds.Woovv, t2))
-        Hr2[:,i,:,:] += -imds.Foo_p[i,i] + tmp
-        Hr2[i,:,:,:] += -imds.Foo_p[i,i] + tmp
+        Hr2[:,i,:,:] += -imds.Foo_p[i,i] + tmp * imds.p_beta
+        Hr2[i,:,:,:] += -imds.Foo_p[i,i] + tmp * imds.p_beta
         for j in range(i):
             Hr2[i,j,:,:] += 0.5*(imds.Woooo_p[i,j,i,j]-imds.Woooo_p[j,i,i,j])
 
     vector = eom.amplitudes_to_vector(Hr1, Hr2)
     return vector
-
-########################################
-# EOM-EE-CCSD
-########################################
 
 class EOMEE(eom_gccsd.EOMEE):
     matvec = eeccsd_matvec
@@ -186,6 +304,11 @@ class EOMEE(eom_gccsd.EOMEE):
     
 gdcsd.GDCSD.EOMEE = lib.class_as_method(EOMEE)
 gdcsd.pGCCSD.EOMEE = lib.class_as_method(EOMEE)
+gdcsd.GDCD.EOMEA = lib.class_as_method(EOMEA)
+gdcsd.pGCCSD.EOMEA = lib.class_as_method(EOMEA)
+gdcsd.GDCSD.EOMIP = lib.class_as_method(EOMIP)
+gdcsd.pGCCSD.EOMIP = lib.class_as_method(EOMIP)
+
 
 class _IMDS:
     def __init__(self, cc, eris=None):
@@ -236,7 +359,20 @@ class _IMDS:
         return self
 
     def make_ip(self):
-        raise NotImplementedError
+        if not self._made_shared:
+            self._make_shared()
+
+        cput0 = (logger.process_clock(), logger.perf_counter())
+
+        t1, t2, eris = self.t1, self.t2, self.eris
+
+        # 0 or 1 virtuals
+        self.Woooo_p = Woooo_p(t1, t2, eris, self.gamma)
+        self.Wooov = imd.Wooov(t1, t2, eris)
+        self.Wovoo = imd.Wovoo(t1, t2, eris)
+
+        self.made_ip_imds = True
+        logger.timer_debug1(self, 'EOM-DCSD IP intermediates', *cput0)
         return self
 
     def make_t3p2_ip(self, cc):
@@ -245,7 +381,20 @@ class _IMDS:
 
 
     def make_ea(self):
-        raise NotImplementedError
+        if not self._made_shared:
+            self._make_shared()
+
+        cput0 = (logger.process_clock(), logger.perf_counter())
+
+        t1, t2, eris = self.t1, self.t2, self.eris
+
+        # 3 or 4 virtuals
+        self.Wvovv = imd.Wvovv(t1, t2, eris)
+        self.Wvvvv_p = Wvvvv_p(t1, t2, eris, self.gamma)
+        self.Wvvvo = imd.Wvvvo(t1, t2, eris)
+
+        self.made_ea_imds = True
+        logger.timer_debug1(self, 'EOM-DCSD EA intermediates', *cput0)
         return self
 
     def make_t3p2_ea(self, cc):
@@ -273,6 +422,5 @@ class _IMDS:
             self.Wvvvo = imd.Wvvvo(t1, t2, eris)
 
         self.made_ee_imds = True
-        logger.timer(self, 'EOM-CCSD EE intermediates', *cput0)
+        logger.timer(self, 'EOM-DCSD EE intermediates', *cput0)
         return self
-
