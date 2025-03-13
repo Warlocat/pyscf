@@ -62,15 +62,15 @@ def Foo_p(t1, t2, eris, beta):
             + 0.5*einsum('inef,mnef->mi', tau_p, eris.oovv) )
     return Fmi
 
-def Woooo_p(t1, t2, eris, gamma):
-    tau_p = make_tau_p(t2, t1, fac_t2=gamma)
+def Woooo_p(t1, t2, eris, p_gamma):
+    tau_p = make_tau_p(t2, t1, fac_t2=p_gamma)
     tmp = einsum('je,mnie->mnij', t1, eris.ooov)
     Wmnij = eris.oooo + tmp - tmp.transpose(0,1,3,2)
     Wmnij += 0.5*einsum('ijef,mnef->mnij', tau_p, np.asarray(eris.oovv))
     return Wmnij
 
-def Wvvvv_p(t1, t2, eris, gamma):
-    tau_p = make_tau_p(t2, t1, fac_t2=gamma)
+def Wvvvv_p(t1, t2, eris, p_gamma):
+    tau_p = make_tau_p(t2, t1, fac_t2=p_gamma)
     eris_ovvv = np.asarray(eris.ovvv)
     tmp = einsum('mb,mafe->bafe', t1, eris_ovvv)
     Wabef = np.asarray(eris.vvvv) - tmp + tmp.transpose(1,0,2,3)
@@ -328,13 +328,13 @@ class _IMDS:
             self.p_alpha = cc.p_sigma
             self.p_delta = cc.p_sigma
             self.p_beta = (1.0 + cc.p_mu) / 2.0
-            self.gamma = cc.p_mu
+            self.p_gamma = cc.p_mu
             self.oovv_phys = None
         elif hasattr(cc, "oovv_phys"): # DCSD
             self.p_alpha = 0.5
             self.p_beta = 0.5
             self.p_delta = 1.0
-            self.gamma = 0.0
+            self.p_gamma = 0.0
             self.oovv_phys = cc.oovv_phys
         else:
             raise ValueError("Unknown method for gdcsd EOM-CC")
@@ -367,7 +367,7 @@ class _IMDS:
         t1, t2, eris = self.t1, self.t2, self.eris
 
         # 0 or 1 virtuals
-        self.Woooo_p = Woooo_p(t1, t2, eris, self.gamma)
+        self.Woooo_p = Woooo_p(t1, t2, eris, self.p_gamma)
         self.Wooov = imd.Wooov(t1, t2, eris)
         self.Wovoo = imd.Wovoo(t1, t2, eris)
 
@@ -390,7 +390,7 @@ class _IMDS:
 
         # 3 or 4 virtuals
         self.Wvovv = imd.Wvovv(t1, t2, eris)
-        self.Wvvvv_p = Wvvvv_p(t1, t2, eris, self.gamma)
+        self.Wvvvv_p = Wvvvv_p(t1, t2, eris, self.p_gamma)
         self.Wvvvo = imd.Wvvvo(t1, t2, eris)
 
         self.made_ea_imds = True
@@ -412,13 +412,13 @@ class _IMDS:
 
         if not self.made_ip_imds:
             # 0 or 1 virtuals
-            self.Woooo_p = Woooo_p(t1, t2, eris, self.gamma)
+            self.Woooo_p = Woooo_p(t1, t2, eris, self.p_gamma)
             self.Wooov = imd.Wooov(t1, t2, eris)
             self.Wovoo = imd.Wovoo(t1, t2, eris)
         if not self.made_ea_imds:
             # 3 or 4 virtuals
             self.Wvovv = imd.Wvovv(t1, t2, eris)
-            self.Wvvvv_p = Wvvvv_p(t1, t2, eris, self.gamma)
+            self.Wvvvv_p = Wvvvv_p(t1, t2, eris, self.p_gamma)
             self.Wvvvo = imd.Wvvvo(t1, t2, eris)
 
         self.made_ee_imds = True

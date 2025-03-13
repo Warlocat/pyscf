@@ -239,16 +239,76 @@ class GDCSD(gccsd.GCCSD):
         super().__init__(mf, frozen, mo_coeff, mo_occ)
         self.oovv_phys = _make_eris_phys_incore(self).oovv
 
-class pGCCSD(gccsd.GCCSD):
+class pGCCSD(GDCSD):
     p_mu = -1.0
     p_sigma = 1.0
+    update_amps = update_amps
     def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None, mu=None, sigma=None):
         super().__init__(mf, frozen, mo_coeff, mo_occ)
         if mu is not None:
             self.p_mu = mu
         if sigma is not None:
             self.p_sigma = sigma
-    update_amps = update_amps
+    def solve_lambda(self, t1=None, t2=None, l1=None, l2=None,
+                     eris=None):
+        from pyscf.cc import gdcsd_lambda
+        if t1 is None: t1 = self.t1
+        if t2 is None: t2 = self.t2
+        if eris is None: eris = self.ao2mo(self.mo_coeff)
+        self.converged_lambda, self.l1, self.l2 = \
+                gdcsd_lambda.kernel(self, eris, t1, t2, l1, l2,
+                                    max_cycle=self.max_cycle,
+                                    tol=self.conv_tol_normt,
+                                    verbose=self.verbose)
+        return self.l1, self.l2
+
+    def ccsd_t(self, t1=None, t2=None, eris=None):
+        raise NotImplementedError
+
+    def ipccsd(self, nroots=1, left=False, koopmans=False, guess=None,
+               partition=None, eris=None):
+        from pyscf.cc import eom_gdcsd
+        return eom_gdcsd.EOMIP(self).kernel(nroots, left, koopmans, guess,
+                                            partition, eris)
+
+    def eaccsd(self, nroots=1, left=False, koopmans=False, guess=None,
+               partition=None, eris=None):
+        from pyscf.cc import eom_gdcsd
+        return eom_gdcsd.EOMEA(self).kernel(nroots, left, koopmans, guess,
+                                            partition, eris)
+
+    def eeccsd(self, nroots=1, koopmans=False, guess=None, eris=None):
+        from pyscf.cc import eom_gdcsd
+        return eom_gdcsd.EOMEE(self).kernel(nroots, koopmans, guess, eris)
+
+    def eomip_method(self):
+        from pyscf.cc import eom_gdcsd
+        return eom_gdcsd.EOMIP(self)
+
+    def eomea_method(self):
+        from pyscf.cc import eom_gdcsd
+        return eom_gdcsd.EOMEA(self)
+
+    def eomee_method(self):
+        from pyscf.cc import eom_gdcsd
+        return eom_gdcsd.EOMEE(self)
+
+    def make_rdm1(self, t1=None, t2=None, l1=None, l2=None, ao_repr=False,
+                  with_frozen=True, with_mf=True):
+        '''Un-relaxed 1-particle density matrix in MO space'''
+        from pyscf.cc import gdcsd_rdm
+        if t1 is None: t1 = self.t1
+        if t2 is None: t2 = self.t2
+        if l1 is None: l1 = self.l1
+        if l2 is None: l2 = self.l2
+        if l1 is None: l1, l2 = self.solve_lambda(t1, t2)
+        return gdcsd_rdm.make_rdm1(self, t1, t2, l1, l2, ao_repr=ao_repr,
+                                   with_frozen=with_frozen, with_mf=with_mf)
+
+    def make_rdm2(self, t1=None, t2=None, l1=None, l2=None, ao_repr=False,
+                  with_frozen=True, with_dm1=True):
+        raise NotImplementedError
+    
 
 class GDCD(GDCSD):
     def update_amps(self, t1, t2, eris):
@@ -261,6 +321,27 @@ class GDCD(GDCSD):
         t1 = np.zeros((nocc, nvir))
         GDCSD.kernel(self, t1, t2, eris)
         return self.e_corr, self.t2
+    
+    def solve_lambda(self, t2=None, l2=None, eris=None):
+        from pyscf.cc import gdcsd_lambda
+        if t2 is None: t2 = self.t2
+        if eris is None: eris = self.ao2mo(self.mo_coeff)
+
+        nocc = self.nocc
+        nvir = self.nmo - nocc
+        l1 = t1 = np.zeros((nocc, nvir))
+
+        def update_lambda(mycc, t1, t2, l1, l2, eris=None, imds=None):
+            l1, l2 = gdcsd_lambda.update_lambda(mycc, t1, t2, l1, l2, eris, imds)
+            return np.zeros_like(l1), l2
+
+        self.converged_lambda, self.l1, self.l2 = \
+                gdcsd_lambda.kernel(self, eris, t1, t2, l1, l2,
+                                   max_cycle=self.max_cycle,
+                                   tol=self.conv_tol_normt,
+                                   verbose=self.verbose, fupdate=update_lambda)
+        return self.l2
+
 class pGCCD(pGCCSD):
     def update_amps(self, t1, t2, eris):
         t1, t2 = update_amps(self, t1, t2, eris)
@@ -272,6 +353,22 @@ class pGCCD(pGCCSD):
         t1 = np.zeros((nocc, nvir))
         pGCCSD.kernel(self, t1, t2, eris)
         return self.e_corr, self.t2
+    
+    def make_rdm2(self, t1=None, t2=None, l1=None, l2=None, ao_repr=False,
+                  with_frozen=True, with_dm1=True):
+        '''2-particle density matrix in MO space.  The density matrix is
+        stored as
+
+        dm2[p,r,q,s] = <p^+ q^+ s r>
+        '''
+        from pyscf.cc import gdcsd_rdm
+        if t1 is None: t1 = self.t1
+        if t2 is None: t2 = self.t2
+        if l1 is None: l1 = self.l1
+        if l2 is None: l2 = self.l2
+        if l1 is None: l1, l2 = self.solve_lambda(t1, t2)
+        return gdcsd_rdm.make_rdm2(self, t1, t2, l1, l2, ao_repr=ao_repr,
+                                   with_frozen=with_frozen, with_dm1=with_dm1)
 
 if __name__ == '__main__':
     from pyscf import scf, gto
@@ -290,7 +387,7 @@ if __name__ == '__main__':
     fc = 2
     mydc = GDCSD(rhf.to_ghf(),frozen=fc)
     mydc.kernel()
-    mypcc = pGCCSD(rhf.to_ghf(),frozen=fc, alpha=1.0, beta=1.0)
+    mypcc = pGCCSD(rhf.to_ghf(),frozen=fc, mu=1.0, sigma=1.0)
     mypcc.kernel()
     mycc = gccsd.GCCSD(rhf.to_ghf(),frozen=fc)
     mycc.kernel()
