@@ -38,6 +38,22 @@ from pyscf import __config__
 BLKMIN = getattr(__config__, 'cc_ccsd_blkmin', 4)
 MEMORYMIN = getattr(__config__, 'cc_ccsd_memorymin', 2000)
 
+def cc_parameter(mycc):
+    # change notation from mu sigma to alpha beta gamma delta
+    # to make DCSD and pCCSD more consistent in the code
+    if hasattr(mycc, "p_mu"): # pCCSD
+        is_dcsd = False
+        p_alpha = mycc.p_sigma
+        p_delta = mycc.p_sigma
+        p_beta = (1.0 + mycc.p_mu) / 2.0
+        p_gamma = mycc.p_mu
+    else: # DCSD
+        is_dcsd = True
+        p_alpha = 0.5
+        p_beta = 0.5
+        p_gamma = 0.0
+        p_delta = 1.0
+    return p_alpha, p_beta, p_gamma, p_delta, is_dcsd
 
 
 def update_amps(mycc, t1, t2, eris):
@@ -269,18 +285,84 @@ class DCSD(ccsd.CCSD):
     __doc__ = ccsd.CCSD.__doc__
 
     def solve_lambda(self, t1=None, t2=None, l1=None, l2=None, eris=None):
-        raise NotImplementedError
+        from pyscf.cc import dcsd_lambda
+        if t1 is None: t1 = self.t1
+        if t2 is None: t2 = self.t2
+        if eris is None: eris = self.ao2mo(self.mo_coeff)
+        self.converged_lambda, self.l1, self.l2 = \
+                dcsd_lambda.kernel(self, eris, t1, t2, l1, l2,
+                                   max_cycle=self.max_cycle,
+                                   tol=self.conv_tol_normt,
+                                   verbose=self.verbose)
+        return self.l1, self.l2
 
     def ccsd_t(self, t1=None, t2=None, eris=None):
         raise NotImplementedError
 
+    def ipccsd(self, nroots=1, left=False, koopmans=False, guess=None,
+               partition=None, eris=None):
+        from pyscf.cc import eom_rdcsd
+        return eom_rdcsd.EOMIP(self).kernel(nroots, left, koopmans, guess,
+                                            partition, eris)
+
+    def eaccsd(self, nroots=1, left=False, koopmans=False, guess=None,
+               partition=None, eris=None):
+        from pyscf.cc import eom_rdcsd
+        return eom_rdcsd.EOMEA(self).kernel(nroots, left, koopmans, guess,
+                                            partition, eris)
+
+    def eeccsd(self, nroots=1, koopmans=False, guess=None, eris=None):
+        raise NotImplementedError("Please use eomee_ccsd_singlet or eomee_ccsd_triplet")
+
+    def eomee_ccsd_singlet(self, nroots=1, koopmans=False, guess=None, eris=None):
+        from pyscf.cc import eom_rdcsd
+        return eom_rdcsd.EOMEESinglet(self).kernel(nroots, koopmans, guess, eris)
+
+    def eomee_ccsd_triplet(self, nroots=1, koopmans=False, guess=None, eris=None):
+        from pyscf.cc import eom_rdcsd
+        return eom_rdcsd.EOMEETriplet(self).kernel(nroots, koopmans, guess, eris)
+
+    def eomsf_ccsd(self, nroots=1, koopmans=False, guess=None, eris=None):
+        raise NotImplementedError
+
+    def eomip_method(self):
+        from pyscf.cc import eom_rdcsd
+        return eom_rdcsd.EOMIP(self)
+
+    def eomea_method(self):
+        from pyscf.cc import eom_rdcsd
+        return eom_rdcsd.EOMEA(self)
+
+    def eomee_method(self):
+        raise NotImplementedError("Please use eomee_ccsd_singlet or eomee_ccsd_triplet")
+
     def make_rdm1(self, t1=None, t2=None, l1=None, l2=None, ao_repr=False,
                   with_frozen=True, with_mf=True):
-        raise NotImplementedError
+        '''Un-relaxed 1-particle density matrix in MO space'''
+        from pyscf.cc import dcsd_rdm
+        if t1 is None: t1 = self.t1
+        if t2 is None: t2 = self.t2
+        if l1 is None: l1 = self.l1
+        if l2 is None: l2 = self.l2
+        if l1 is None: l1, l2 = self.solve_lambda(t1, t2)
+        return dcsd_rdm.make_rdm1(self, t1, t2, l1, l2, ao_repr=ao_repr,
+                                  with_frozen=with_frozen, with_mf=with_mf)
 
     def make_rdm2(self, t1=None, t2=None, l1=None, l2=None, ao_repr=False,
                   with_frozen=True, with_dm1=True):
-        raise NotImplementedError
+        '''2-particle density matrix in MO space.  The density matrix is
+        stored as
+
+        dm2[p,r,q,s] = <p^+ q^+ s r>
+        '''
+        from pyscf.cc import dcsd_rdm
+        if t1 is None: t1 = self.t1
+        if t2 is None: t2 = self.t2
+        if l1 is None: l1 = self.l1
+        if l2 is None: l2 = self.l2
+        if l1 is None: l1, l2 = self.solve_lambda(t1, t2)
+        return dcsd_rdm.make_rdm2(self, t1, t2, l1, l2, ao_repr=ao_repr,
+                                  with_frozen=with_frozen, with_dm1=with_dm1)
 
     def nuc_grad_method(self):
         raise NotImplementedError
@@ -307,6 +389,59 @@ class DCD(DCSD):
         t1 = numpy.zeros((nocc, nvir))
         DCSD.kernel(self, t1, t2, eris)
         return self.e_corr, self.t2
+    
+    def solve_lambda(self, t2=None, l2=None, eris=None):
+        from pyscf.cc import dcsd_lambda, ccsd_lambda
+        if t2 is None: t2 = self.t2
+        if eris is None: eris = self.ao2mo(self.mo_coeff)
+
+        nocc = self.nocc
+        nvir = self.nmo - nocc
+        l1 = t1 = numpy.zeros((nocc, nvir))
+
+        def update_lambda(mycc, t1, t2, l1, l2, eris=None, imds=None):
+            l1, l2 = dcsd_lambda.update_lambda(mycc, t1, t2, l1, l2, eris, imds)
+            return numpy.zeros_like(l1), l2
+
+        self.converged_lambda, self.l1, self.l2 = \
+                ccsd_lambda.kernel(self, eris, t1, t2, l1, l2,
+                                   max_cycle=self.max_cycle,
+                                   tol=self.conv_tol_normt,
+                                   verbose=self.verbose, 
+                                   fintermediates=dcsd_lambda.make_intermediates,
+                                   fupdate=update_lambda)
+        return self.l2
+    
+    def make_rdm1(self, t2=None, l2=None, ao_repr=False):
+        from pyscf.cc import dcsd_rdm
+        '''Un-relaxed 1-particle density matrix in MO space'''
+        if t2 is None: t2 = self.t2
+        if l2 is None: l2 = self.l2
+        if l2 is None: l2 = self.solve_lambda(t2)
+
+        nocc = self.nocc
+        nvir = self.nmo - nocc
+        l1 = t1 = numpy.zeros((nocc, nvir))
+
+        return dcsd_rdm.make_rdm1(self, t1, t2, l1, l2, ao_repr=ao_repr)
+
+    def make_rdm2(self, t1=None, t2=None, l1=None, l2=None, ao_repr=False):
+        from pyscf.cc import dcsd_rdm
+        '''2-particle density matrix in MO space.  The density matrix is
+        stored as
+
+        dm2[p,r,q,s] = <p^+ q^+ s r>
+        '''
+        if t2 is None: t2 = self.t2
+        if l2 is None: l2 = self.l2
+        if l2 is None: l2 = self.solve_lambda(t2)
+
+        nocc = self.nocc
+        nvir = self.nmo - nocc
+        l1 = t1 = numpy.zeros((nocc, nvir))
+
+        return dcsd_rdm.make_rdm2(self, t1, t2, l1, l2, ao_repr=ao_repr)
+
 class pCCD(pCCSD):
     def update_amps(self, t1, t2, eris):
         t1, t2 = update_amps(self, t1, t2, eris)
@@ -318,6 +453,58 @@ class pCCD(pCCSD):
         t1 = numpy.zeros((nocc, nvir))
         pCCSD.kernel(self, t1, t2, eris)
         return self.e_corr, self.t2
+    
+    def solve_lambda(self, t2=None, l2=None, eris=None):
+        from pyscf.cc import dcsd_lambda, ccsd_lambda
+        if t2 is None: t2 = self.t2
+        if eris is None: eris = self.ao2mo(self.mo_coeff)
+
+        nocc = self.nocc
+        nvir = self.nmo - nocc
+        l1 = t1 = numpy.zeros((nocc, nvir))
+
+        def update_lambda(mycc, t1, t2, l1, l2, eris=None, imds=None):
+            l1, l2 = dcsd_lambda.update_lambda(mycc, t1, t2, l1, l2, eris, imds)
+            return numpy.zeros_like(l1), l2
+
+        self.converged_lambda, self.l1, self.l2 = \
+                ccsd_lambda.kernel(self, eris, t1, t2, l1, l2,
+                                   max_cycle=self.max_cycle,
+                                   tol=self.conv_tol_normt,
+                                   verbose=self.verbose, 
+                                   fintermediates=dcsd_lambda.make_intermediates,
+                                   fupdate=update_lambda)
+        return self.l2
+    
+    def make_rdm1(self, t2=None, l2=None, ao_repr=False):
+        from pyscf.cc import dcsd_rdm
+        '''Un-relaxed 1-particle density matrix in MO space'''
+        if t2 is None: t2 = self.t2
+        if l2 is None: l2 = self.l2
+        if l2 is None: l2 = self.solve_lambda(t2)
+
+        nocc = self.nocc
+        nvir = self.nmo - nocc
+        l1 = t1 = numpy.zeros((nocc, nvir))
+
+        return dcsd_rdm.make_rdm1(self, t1, t2, l1, l2, ao_repr=ao_repr)
+
+    def make_rdm2(self, t1=None, t2=None, l1=None, l2=None, ao_repr=False):
+        from pyscf.cc import dcsd_rdm
+        '''2-particle density matrix in MO space.  The density matrix is
+        stored as
+
+        dm2[p,r,q,s] = <p^+ q^+ s r>
+        '''
+        if t2 is None: t2 = self.t2
+        if l2 is None: l2 = self.l2
+        if l2 is None: l2 = self.solve_lambda(t2)
+
+        nocc = self.nocc
+        nvir = self.nmo - nocc
+        l1 = t1 = numpy.zeros((nocc, nvir))
+
+        return dcsd_rdm.make_rdm2(self, t1, t2, l1, l2, ao_repr=ao_repr)
 
 if __name__ == '__main__':
     from pyscf import scf

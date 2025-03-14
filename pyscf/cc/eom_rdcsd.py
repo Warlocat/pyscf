@@ -708,19 +708,8 @@ class _IMDS:
             eris = cc.ao2mo()
         self.eris = eris
         self._made_shared_2e = False
-        if hasattr(cc, "p_mu"): # pCCSD
-            self.dcsd = False
-            # change notation
-            self.p_alpha = cc.p_sigma
-            self.p_delta = cc.p_sigma
-            self.p_beta = (1.0 + cc.p_mu) / 2.0
-            self.p_gamma = cc.p_mu
-        else: # DCSD
-            self.dcsd = True
-            self.p_alpha = 0.5
-            self.p_beta = 0.5
-            self.p_gamma = 0.0
-            self.p_delta = 1.0
+        self.p_alpha, self.p_beta, self.p_gamma, \
+            self.p_delta, self.is_dcsd = dcsd.cc_parameter(cc)
 
     def _make_shared_1e(self):
         cput0 = (logger.process_clock(), logger.perf_counter())
@@ -742,8 +731,8 @@ class _IMDS:
 
         t1, t2, eris = self.t1, self.t2, self.eris
         # 2 virtuals
-        self.Wovov_p = Wovov_p(t1, t2, eris, self.p_delta, self.dcsd)
-        self.Wovvo_p = Wovvo_p(t1, t2, eris, self.p_delta, self.dcsd)
+        self.Wovov_p = Wovov_p(t1, t2, eris, self.p_delta, self.is_dcsd)
+        self.Wovvo_p = Wovvo_p(t1, t2, eris, self.p_delta, self.is_dcsd)
         self.Woovv = np.asarray(eris.ovov).transpose(0,2,1,3)
 
         self._made_shared_2e = True
@@ -893,7 +882,7 @@ class _IMDS:
 
             ovov = eris_ovov * 2 - eris_ovov.transpose(0,3,2,1)
             woVvO += einsum('njfb,menf->mbej', theta, ovov) * .5
-            if self.dcsd:
+            if self.is_dcsd:
                 woVvO_p += einsum('njfb,menf->mbej', theta, eris_ovov)
             else:
                 woVvO_p += einsum('njfb,menf->mbej', theta, ovov) * .5 * self.p_delta
@@ -902,7 +891,7 @@ class _IMDS:
             tmp = einsum('njbf,mfne->mbej', t2, eris_ovov)
             woVvO -= tmp * .5
             woVVo += tmp
-            if self.dcsd:
+            if self.is_dcsd:
                 pass ######
             else:
                 woVvO_p -= tmp * .5 * self.p_delta
