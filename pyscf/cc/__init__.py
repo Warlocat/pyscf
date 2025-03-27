@@ -68,10 +68,12 @@ from pyscf.cc import ccsd
 from pyscf.cc import ccsd_lambda
 from pyscf.cc import ccsd_rdm
 from pyscf.cc import addons
+from pyscf.cc import dcsd
 from pyscf.cc import rccsd
 from pyscf.cc import uccsd
 from pyscf.cc import gccsd
 from pyscf.cc import eom_rccsd
+from pyscf.cc import eom_rdcsd
 from pyscf.cc import eom_uccsd
 from pyscf.cc import eom_gccsd
 from pyscf.cc import qcisd
