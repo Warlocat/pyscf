@@ -529,12 +529,12 @@ def uncontracted_basis(_basis):
     for b in _basis:
         angl = b[0]
         kappa = b[1]
-        if isinstance(kappa, int):
+        if isinstance(kappa, (int, np.integer)):
             coeffs = b[2:]
         else:
             coeffs = b[1:]
 
-        if isinstance(kappa, int) and kappa != 0:
+        if isinstance(kappa, (int, np.integer)) and kappa != 0:
             warnings.warn('For basis with kappa != 0, the uncontract basis might be wrong. '
                           'Please double check the resultant attribute mol._basis')
             for p in coeffs:
@@ -880,6 +880,7 @@ def conc_mol(mol1, mol2):
 
     mol3.verbose = mol1.verbose
     mol3.output = mol1.output
+    mol3.stdout = mol1.stdout
     mol3.max_memory = mol1.max_memory
     mol3.charge = mol1.charge + mol2.charge
     mol3.spin = abs(mol1.spin - mol2.spin)
@@ -1002,7 +1003,7 @@ def make_bas_env(basis_add, atom_id=0, ptr=0):
             sys.stderr.write('Warning: integral library does not support basis '
                              'with angular momentum > 14\n')
 
-        if isinstance(b[1], int):
+        if isinstance(b[1], (int, np.integer)):
             kappa = b[1]
             b_coeff = numpy.array(sorted(b[2:], reverse=True))
         else:
@@ -2152,7 +2153,7 @@ def fromstring(string, format='xyz'):
     '''
     format = format.lower()
     if format == 'zmat':
-        return from_zmatrix(string)
+        return string
     elif format == 'xyz':
         line, title, geom = string.split('\n', 2)
         return geom
@@ -2806,7 +2807,7 @@ class MoleBase(lib.StreamObject):
             for atom, basis_set in self._basis.items():
                 self.stdout.write('[INPUT] %s\n' % atom)
                 for b in basis_set:
-                    if isinstance(b[1], int):
+                    if isinstance(b[1], (int, np.integer)):
                         kappa = b[1]
                         b_coeff = b[2:]
                     else:
@@ -3836,16 +3837,45 @@ class Mole(MoleBase):
         from pyscf import ao2mo
         return ao2mo.kernel(self, mo_coeffs, erifile, dataname, intor, **kwargs)
 
-    def to_cell(self, a, dimension=3):
-        '''Put a molecule in a cell with periodic boundary conditions
+    def to_cell(self, box=None, dimension=3, margin=None):
+        '''This function places a molecule in a three-dimensiontal box with
+        periodic boundary conditions.
+
+        If the `box` parameter is not specified, the molecule will positioned in
+        a zero-dimensional box with margin from edges.
 
         Args:
-            a : (3,3) ndarray
-                Lattice primitive vectors. Each row is a lattice vector
+            box : (3,3) ndarray
+                Lattice primitive vectors. Each row corresponds a lattice vector
+            dimension : integer
+                PBC dimensions
+            margin: float
+                The distance from the edge of the molecule to the edge of the box.
+                If not provided, a default margin will be estimated, to ensure
+                that the electron density decays to approximately 1e-7 outside
+                of the box.
         '''
-        from pyscf.pbc.gto import Cell
+        from pyscf.pbc.gto import Cell, rcut_by_shells
+        assert dimension <= 3
         cell = Cell()
         cell.__dict__.update(self.__dict__)
+        if box is None:
+            # Place molecule in a big box
+            atom_coords = self.atom_coords()
+            if margin is None:
+                # when the basis value converges to ~1e-4, the density value
+                # ~psi^2 is approximately ~1e-8
+                shell_radius = rcut_by_shells(self, precision=1e-4)
+                bas_coords = atom_coords[self._bas[:,ATOM_OF]]
+                upper_bound = (bas_coords + shell_radius[:,None]).max(axis=0)
+                lower_bound = (bas_coords - shell_radius[:,None]).min(axis=0)
+                box_size = upper_bound - lower_bound
+                box = numpy.diag(box_size)
+            else:
+                atom_coords = self.atom_coords()
+                size = atom_coords.max(axis=0) - atom_coords.min(axis=0)
+                box = numpy.eye(3) * (size+margin*2)
+        cell.a = box
         cell.dimension = dimension
         cell.build(False, False)
         return cell
@@ -4215,3 +4245,36 @@ def bse_predefined_ecp(basis_name, elements):
             if ecp_atoms:
                 ecp = basis_meta[0] # standard format basis set name
     return ecp, ecp_atoms
+
+def extract_pgto_params(mol, op='diffused'):
+    '''A helper function to extract exponents and contraction coefficients of
+    the most diffused or compact primitive GTOs for each shell. These exponents
+    and coefficients are typically used in estimating rcut and Ecut for PBC
+    methods.
+    '''
+    if op != 'diffused' and op != 'compact':
+        raise RuntimeError(f'Unsupported operation {op}')
+
+    e = np.hstack(mol.bas_exps())
+    c = np.hstack([abs(mol._libcint_ctr_coeff(i)).max(axis=1)
+                   for i in range(mol.nbas)])
+    l = np.repeat(mol._bas[:,ANG_OF], mol._bas[:,NPRIM_OF])
+    basis_id = np.repeat(np.arange(mol.nbas), mol._bas[:,NPRIM_OF])
+    precision = 1e-8
+    if op == 'diffused':
+        # A quick estimation for the radius that each primitive GTO decays to the
+        # value smaller than the required precision
+        r2 = np.log(c**2/precision * 10**l + 1e-200) / e
+        # groupby.argmin()
+        r2_order = np.argsort(-r2)
+        _, idx = np.unique(basis_id[r2_order], return_index=True)
+        idx = r2_order[idx]
+    else:
+        # A quick estimation for the resolution of planewaves that each
+        # primitive GTO requires
+        ke = np.log(c**2 / precision * 50**l + 1e-200) * e
+        # groupby.argmax()
+        ke_order = np.argsort(-ke)
+        _, idx = np.unique(basis_id[ke_order], return_index=True)
+        idx = ke_order[idx]
+    return e[idx], c[idx]
