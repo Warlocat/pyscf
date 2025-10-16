@@ -384,6 +384,11 @@ ALIAS = {
 # SAP
     'sapgraspsmall'   : 'sap_grasp_small.dat',
     'sapgrasplarge'   : 'sap_grasp_large.dat',
+# GTH basis from HZ Ye
+    'gthccpvqzlc' : os.path.join('../../pbc/gto/basis', 'gth-cc-pvqz-lc.dat' ),
+    'gthccpvtzlc' : os.path.join('../../pbc/gto/basis', 'gth-cc-pvtz-lc.dat' ),
+    'gthccpvdzlc' : os.path.join('../../pbc/gto/basis', 'gth-cc-pvdz-lc.dat' ),
+    'gthccpvdzlcminao' : os.path.join('../../pbc/gto/basis', 'gth-cc-pvdz-lc-minao.dat' ),
 }
 
 USER_BASIS_DIR = getattr(__config__, 'USER_BASIS_DIR', '')

@@ -589,6 +589,8 @@ def nr_rks(mydf, xc_code, dm_kpts, hermi=1, kpts=None,
     vG = np.multiply(rhoG[0,0], coulG)
     coulG = None
 
+    if mydf.vpplocG_part1 is None:
+        mydf.vpplocG_part1 = _get_vpplocG_part1(mydf, with_rho_core=True)
     if mydf.vpplocG_part1 is not None:
         vG += mydf.vpplocG_part1 * 2
 

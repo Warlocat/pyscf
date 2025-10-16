@@ -424,3 +424,99 @@ class _IMDS:
         self.made_ee_imds = True
         logger.timer(self, 'EOM-DCSD EE intermediates', *cput0)
         return self
+
+
+if __name__ == '__main__':
+    from pyscf import gto, scf, cc, dft
+    from pyscf.cc import eom_rccsd
+    import numpy as np
+    from pyscf.data.nist import HARTREE2EV
+    
+    mol = gto.Mole()
+    re = 2.13713
+    mol.atom = f'''
+C 0.0 0.0 0.0
+H 0.0 0.0 {5.0}
+'''
+    mol.basis ={'H': gto.basis.parse('''
+H S
+    19.2406  0.032828
+     2.8992  0.231208
+     0.6534  0.817238
+H S
+     0.1776  1.0
+H S
+     0.0250  1.0
+H P
+     1.0000  1.0
+''', optimize=True), 'C': gto.basis.parse('''
+C S
+  4231.61   0.002029
+   634.882   0.015535
+   146.097   0.075411
+    42.4974  0.257121
+    14.1892  0.596555
+     1.9666  0.242517
+C S
+     5.1477  1.0
+C S
+     0.4962  1.0
+C S
+     0.1533  1.0
+C S
+     0.0150  1.0
+C P
+    18.1557  0.018534
+     3.9864  0.115442
+     1.1429  0.386206
+     0.3594  0.640089
+C P
+     0.1146  1.0
+C P
+     0.0110  1.0
+C D
+     0.7500  1.0
+                                          ''' , optimize=True)}
+    mol.unit = "bohr"
+    mol.cart = True
+    mol.charge = 1
+    mol.symmetry = False
+    mol.build()
+    mf = scf.RHF(mol)
+    mf.conv_tol = 1e-10
+    mf.kernel()
+    mycc = cc.CCSD(mf, frozen=1)
+    mycc.conv_tol = 1e-10
+    mycc.run()
+    print("RCCSD")
+    print(mycc.e_corr)
+    myeom = eom_rccsd.EOMEETriplet(mycc)
+    myeom.kernel(nroots=10)
+    print(myeom.e*HARTREE2EV)
+    myeom = eom_rccsd.EOMEESinglet(mycc)
+    myeom.conv_tol = 1e-8
+    myeom.kernel(nroots=10)
+    print(myeom.e*HARTREE2EV)
+    # exit()
+    print("GDCSD")
+    mycc = gdcsd.GDCSD(mf.to_ghf(), frozen=2).run()
+    print(mycc.e_corr)
+    myeom = EOMEE(mycc)
+    myeom.kernel(nroots=60)
+    print(myeom.e*HARTREE2EV)
+    print("2CC")
+    mycc = gdcsd.pGCCSD(mf.to_ghf(), frozen=2, mu=1.0, sigma=0.0).run()
+    print(mycc.e_corr)
+    myeom = EOMEE(mycc)
+    myeom.kernel(nroots=60)
+    print(myeom.e*HARTREE2EV)
+    print("pGCCSD")
+    mycc = gdcsd.pGCCSD(mf.to_ghf(), frozen=2).run()
+    print(mycc.e_corr)
+    myeom = EOMEE(mycc)
+    myeom.kernel(nroots=60)
+    print(myeom.e*HARTREE2EV)
+
+    # myeom = eom_gccsd.EOMEE(mycc)
+    # myeom.kernel(nroots=100)
+    # print(myeom.e*HARTREE2EV)

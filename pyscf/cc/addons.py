@@ -161,3 +161,17 @@ def convert_to_gccsd(mycc):
     gcc.t1 = spatial2spin(mycc.t1, mf.mo_coeff.orbspin)
     gcc.t2 = spatial2spin(mycc.t2, mf.mo_coeff.orbspin)
     return gcc
+
+def print_amp(t1, t2, frozen = 0, thres = 0.03):
+    for i in range(t1.shape[0]):
+        for j in range(t1.shape[1]):
+            if abs(t1[i,j]) > thres:
+                print('t1[%d,%d] = %.8f' % (i+frozen,j+frozen+t1.shape[0],t1[i,j]))
+    for i in range(t2.shape[0]):
+        for j in range(t2.shape[1]):
+            for k in range(t2.shape[2]):
+                for l in range(t2.shape[3]):
+                    if abs(t2[i,j,k,l]) > thres:
+                        print('t2[%d,%d,%d,%d] = %.8f' % (i+frozen,j+frozen,k+frozen+t1.shape[0],l+frozen+t1.shape[0],t2[i,j,k,l]))
+    print('t1 norm = %.8f' % numpy.linalg.norm(t1))
+    print('t2 norm = %.8f' % numpy.linalg.norm(t2))

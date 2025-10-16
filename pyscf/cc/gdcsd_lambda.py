@@ -229,12 +229,17 @@ if __name__ == '__main__':
     from functools import reduce
 
     mol = gto.Mole()
+    mol = gto.Mole()
+    mol.verbose = 0
     mol.atom = [
-        ["N" , (0. , 0.     , 0.)],
-        ["N" , (0. , -1.2 , 0.0)]]
+        [8 , (0. , 0.     , 0.)],
+        [1 , (0. , -0.757 , 0.587)],
+        [1 , (0. , 0.757  , 0.587)]]
     mol.basis = '631g'
     mol.build()
-    mf = scf.RHF(mol).run(tol_con=1.)
+    mf = scf.RHF(mol)
+    mf.conv_tol=1.
+    mf.kernel()
     ghf = scf.addons.convert_to_ghf(mf)
 
     mcc = gdcsd.pGCCSD(ghf)
@@ -261,6 +266,43 @@ if __name__ == '__main__':
     e1+= numpy.einsum('ijkl,ijkl', eri, dm2) * .5
     e1+= mol.energy_nuc()
     print(e1 - mcc.e_tot)
+
+    def finite(x):
+        mf = scf.GHF(mol)
+        get_hcore_old = mf.get_hcore
+        t = mol.intor('int1e_r')[2] * x
+        t_spin = numpy.zeros((2*t.shape[0], 2*t.shape[1]))
+        t_spin[:t.shape[0], :t.shape[1]] = t
+        t_spin[t.shape[0]:, t.shape[1]:] = t
+        def get_hcore(mol, x):
+            h1e = get_hcore_old(mol)
+            return h1e + t_spin
+        mf.get_hcore = lambda *args, **kwargs: get_hcore(mf.mol, x)
+        mf.conv_tol = 1e-12
+        mf.kernel()
+        fock_mo = reduce(numpy.dot, (mf.mo_coeff.T, t_spin, mf.mo_coeff))
+        return mf, fock_mo
+    dx = 1e-4
+    mf0, fock_mo0 = finite(0.0)
+    mf1, fock_mo1 = finite(dx)
+    mf2, fock_mo2 = finite(-dx)
+    dfock = (fock_mo1 - fock_mo2) / 2 / dx
+    mycc0 = gdcsd.GDCSD(mf0)
+    mycc0.conv_tol = 1e-10
+    ecc, t1, t2 = mycc0.kernel()
+    mycc1 = gdcsd.GDCSD(mf1)
+    mycc1.conv_tol = 1e-10
+    mycc1.kernel()
+    mycc2 = gdcsd.GDCSD(mf2)
+    mycc2.conv_tol = 1e-10
+    mycc2.kernel()
+
+    conv, l1, l2 = kernel(mycc0, t1=t1, t2=t2, tol=1e-8)
+    de = (mycc1.e_tot - mycc2.e_tot) / 2 / dx
+    rdm = gdcsd_rdm.make_rdm1(mycc0, t1, t2, l1, l2)
+    print(numpy.trace(numpy.dot(dfock, rdm)) - de)
+    print(de)
+    print(numpy.trace(numpy.dot(dfock, rdm)))
 
 
     

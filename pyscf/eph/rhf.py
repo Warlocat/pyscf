@@ -60,34 +60,32 @@ def solve_hmat(mol, hmat, cutoff_frequency=CUTOFF_FREQUENCY,
             h[i,j] = hmat[i,j] / np.sqrt(mass[i]*mass[j])
     forcemat = h.transpose(0,2,1,3).reshape(natom*3, natom*3)
     forcemat[abs(forcemat)<1e-12]=0 #improve stability
-    w, c = scipy.linalg.eig(forcemat)
-    idx = np.argsort(w.real)[::-1] # sort the mode of the frequency
-    w = w[idx]
-    c = c[:,idx]
-    w_au = w**0.5
-    w_cm = w_au * HARTREE2WAVENUMBER
+    w, c = scipy.linalg.eigh(forcemat)
+    real_idx = np.where(w>0)[0]
+    imag_idx = np.where(w<0)[0]
+    w_au_r = w[real_idx]**0.5
+    w_au_i = (-w[imag_idx])**0.5
+    w_cm_r = w_au_r * HARTREE2WAVENUMBER
+    w_cm_i = w_au_i * HARTREE2WAVENUMBER
     log.info('****Eigenmodes(cm-1)****')
-    for i, omega in enumerate(w_cm):
-        if abs(omega.imag) < IMAG_CUTOFF_FREQUENCY:
-            w_au[i] = w_au[i].real
-            w_cm[i] = w_cm[i].real
-            if omega.real > cutoff_frequency:
-                log.info("Mode %i Omega=%.4f", i, omega.real)
-            else:
-                log.info("Mode %i Omega=%.4f, mode filtered", i, omega.real)
+    for i, omega in enumerate(w_cm_r):
+        if omega > cutoff_frequency:
+            log.info("Mode %i Omega=%.4f", i, omega)
         else:
-            log.info("Mode %i Omega=%.4fj, imaginary mode", i, omega.imag)
-    if KEEP_IMAG_FREQUENCY:
-        idx_real = np.where(w_cm.real>cutoff_frequency)[0]
-        idx_imag = np.where(abs(w_cm.imag)>IMAG_CUTOFF_FREQUENCY)[0]
-        idx = np.concatenate([idx_real, idx_imag])
+            log.info("Mode %i Omega=%.4f, mode filtered", i, omega)
+    if len(w_cm_i)>0:
+        log.info('****Imaginary Eigenmodes(cm-1)****')
+        for i, omega in enumerate(w_cm_i):
+            log.info("Mode %i Omega=%.4fj", i, omega)
+    if keep_imag_frequency:
+        w_new = np.concatenate((w_au_r, 1j*w_au_i))
+        c_new = np.concatenate((c[:,real_idx], c[:,imag_idx]), axis=1)
     else:
-        w_au = w_au.real
-        idx = np.where(w_cm.real>cutoff_frequency)[0]
-    w_new = w_au[idx]
-    c_new = c[:,idx]
+        w_new = w_au_r[w_cm_r>cutoff_frequency]
+        c_new = c[:,real_idx][:,w_cm_r>cutoff_frequency]
+    w_cm = w_new * HARTREE2WAVENUMBER
     log.info('****Remaining Eigenmodes(cm-1)****')
-    for i, omega in enumerate(w_cm[idx]):
+    for i, omega in enumerate(w_cm):
         if omega.imag == 0:
             log.info("Mode %i Omega=%.4f", i, omega.real)
         else:

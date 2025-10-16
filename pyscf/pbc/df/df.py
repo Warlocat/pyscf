@@ -236,7 +236,7 @@ class GDF(lib.StreamObject, aft.AFTDFMixin):
             log.debug1('    kpts_band = %s', self.kpts_band)
         return self
 
-    def build(self, j_only=None, with_j3c=True, kpts_band=None):
+    def build(self, j_only=None, with_j3c=True, kpts_band=None, auxcell=None):
         if j_only is not None:
             self._j_only = j_only
         if self.kpts_band is not None:
@@ -250,9 +250,11 @@ class GDF(lib.StreamObject, aft.AFTDFMixin):
 
         self.check_sanity()
         self.dump_flags()
-
-        self.auxcell = make_modrho_basis(self.cell, self.auxbasis,
+        if auxcell is None:
+            self.auxcell = make_modrho_basis(self.cell, self.auxbasis,
                                          self.exp_to_discard)
+        else:
+            self.auxcell = auxcell
 
         if with_j3c and self._cderi_to_save is not None:
             if isinstance(self._cderi_to_save, str):

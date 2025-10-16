@@ -692,6 +692,8 @@ class EOMEETriplet(eom_rccsd.EOMEETriplet):
     
 dcsd.DCSD.EOMEESinglet = lib.class_as_method(EOMEESinglet)
 dcsd.pCCSD.EOMEESinglet = lib.class_as_method(EOMEESinglet)
+dcsd.DCSD.EOMEETriplet = lib.class_as_method(EOMEETriplet)
+dcsd.pCCSD.EOMEETriplet = lib.class_as_method(EOMEETriplet)
 dcsd.DCSD.EOMEA = lib.class_as_method(EOMEA)
 dcsd.pCCSD.EOMEA = lib.class_as_method(EOMEA)
 dcsd.DCSD.EOMIP = lib.class_as_method(EOMIP)

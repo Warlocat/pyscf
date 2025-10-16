@@ -124,7 +124,7 @@ class DF(lib.StreamObject):
                      self._cderi)
         return self
 
-    def build(self):
+    def build(self, auxmol=None):
         t0 = (logger.process_clock(), logger.perf_counter())
         log = logger.Logger(self.stdout, self.verbose)
 
@@ -135,7 +135,10 @@ class DF(lib.StreamObject):
             return self
 
         mol = self.mol
-        auxmol = self.auxmol = addons.make_auxmol(self.mol, self.auxbasis)
+        if auxmol is None:
+            auxmol = self.auxmol = addons.make_auxmol(self.mol, self.auxbasis)
+        else:
+            self.auxmol = auxmol
         nao = mol.nao_nr()
         naux = auxmol.nao_nr()
         nao_pair = nao*(nao+1)//2

@@ -1,5 +1,6 @@
 import numpy
-from pyscf.scf import hf
+import numpy as np
+from pyscf import scf
 from pyscf.cc import ccsd
 from pyscf import lib
 from pyscf.lib import logger
@@ -11,17 +12,18 @@ IP_CONTINUUM, EA_CONTINUUM = [0,1]
 
 class _CONTINUUM_ORBITAL_HF_:
     def __init__(self, mf, continuum_orbital):
+        assert isinstance(mf, scf.hf.RHF)
         self._scf = mf
         self.__dict__.update(mf.__dict__)
         self.init_guess = "hcore"
-        continuum_orbital = continuum_orbital.lower()
-        assert continuum_orbital in ["occupied", "virtual", "ip", "ea"]
-        self.continuum_orbital = continuum_orbital
+        self.continuum_orbital = continuum_orbital.lower()
+        assert self.continuum_orbital in ["occupied", "virtual", "ip", "ea"]
         if self.continuum_orbital == "occupied" or self.continuum_orbital == "ea":
             mol_tmp = mf.mol.copy()
             mol_tmp.charge -= 2
             mol_tmp.build()
             self.mol = mol_tmp
+            self._scf.mol = mol_tmp
     
     def get_hcore(self, mol=None):
         hcore_deriv = self._scf.get_hcore(mol)
@@ -45,6 +47,60 @@ class _CONTINUUM_ORBITAL_HF_:
         jk[0, :n, :n] = jk_deriv[0]
         jk[1, :n, :n] = jk_deriv[1]
         return jk
+    def get_occ(self, mo_energy, *args, **kwargs):
+        occ_deriv = self._scf.get_occ(mo_energy, *args, **kwargs)
+        if mo_energy is None:
+            return occ_deriv
+        nocc = sum(occ_deriv > 0)
+        # check if the continuum orbital is occupied
+        for i in range(len(mo_energy)):
+            if abs(mo_energy[i]) < 1e-6:
+                co_index = i
+                break
+        if self.continuum_orbital == "occupied" or self.continuum_orbital == "ea":
+            if occ_deriv[co_index] == 0:
+                occ_deriv[co_index] = 2.0
+                occ_deriv[nocc - 1] = 0.0
+        elif self.continuum_orbital == "virtual" or self.continuum_orbital == "ip":
+            if occ_deriv[co_index] > 0:
+                occ_deriv[co_index] = 0.0
+                occ_deriv[nocc] = 2.0
+        return occ_deriv
+    def reorder_mo(self):
+        for i in range(len(self.mo_energy)):
+            if abs(self.mo_energy[i]) < 1e-6:
+                co_index = i
+                break
+        nocc = sum(self.mo_occ > 0)
+        def exchange(i, j):
+            tmp = self.mo_coeff[:,i].copy()
+            self.mo_coeff[:,i] = self.mo_coeff[:,j]
+            self.mo_coeff[:,j] = tmp
+            tmp = self.mo_energy[i]
+            self.mo_energy[i] = self.mo_energy[j]
+            self.mo_energy[j] = tmp
+            tmp = self.mo_occ[i]
+            self.mo_occ[i] = self.mo_occ[j]
+            self.mo_occ[j] = tmp
+            return
+        if (self.continuum_orbital == "occupied" or self.continuum_orbital == "ea"):
+            for i in range(co_index-1, 0, -1):
+                if self.mo_occ[i] == 2:
+                    break
+                else:
+                    exchange(i, i+1)
+        elif (self.continuum_orbital == "virtual" or self.continuum_orbital == "ip"):
+            for i in range(co_index+1, len(self.mo_occ)):
+                if self.mo_occ[i] == 0:
+                    break
+                else:
+                    exchange(i, i-1)
+        else:
+            return
+        # reorder the mo
+
+
+
 
 class _CONTINUUM_ORBITAL_CC_:
     def __init__(self, mycc):
@@ -209,7 +265,7 @@ def _make_eris_outcore_co(mycc, mo_coeff):
     eris._common_init_(mycc, mo_coeff)
 
     mol = mycc.mol
-    mo_coeff = numpy.asarray(mycc.mo_coeff[:mycc.mo_coeff.shape[0]-1,:], order='F')
+    mo_coeff = numpy.asarray(eris.mo_coeff[:eris.mo_coeff.shape[0]-1,:], order='F')
     nocc = eris.nocc
     nao, nmo = mo_coeff.shape
     nvir = nmo - nocc
@@ -325,29 +381,33 @@ if __name__ == '__main__':
     
     mol = gto.Mole()
     mol.atom = """
-N 0.0 0.0 0.0
-N 0.0 0.0 2.0656594
-"""
-    mol.unit = "bohr"
-    mol.basis = "cc-pvdz"
+    Au 0.0000000 0.0000000 -1.2651508
+    Au 0.0000000 0.0000000 1.2651508
+    """
+    mol.basis = "def2-tzvpp"
+    mol.ecp = "def2-tzvpp"
+    mol.verbose = 4
     mol.build()
 
-    mf = scf.RHF(mol)
-    mf.kernel()
-    mycc = dcsd.DCSD(mf)
-    mycc.kernel()
-    myeom = mycc.EOMEA()
-    myeom.kernel(nroots=10)
-    print(myeom.e)
-    myeom = mycc.EOMIP()
-    myeom.kernel(nroots=10)
-    print(myeom.e)
+    # mf = scf.RHF(mol)
+    # mf.kernel()
+    # mycc = dcsd.DCSD(mf,frozen=2)
+    # mycc.kernel()
+    # myeom = mycc.EOMEA()
+    # myeom.kernel(nroots=10)
+    # print(myeom.e)
+    # myeom = mycc.EOMIP()
+    # myeom.kernel(nroots=10)
+    # print(myeom.e)
 
-    mf_con = continuum_orbital_mf(scf.RHF(mol),"ea")
+    mf = scf.RHF(mol)
+    mf_con = continuum_orbital_mf(mf,"ea")
     mf_con.kernel()
+    mf_con.reorder_mo()
     print(mf_con.mo_energy)
-    mycc = continuum_orbital_cc(dcsd.DCSD(mf_con))
+    print(mf_con.mo_occ)
+    mycc = continuum_orbital_cc(dcsd.DCSD(mf_con,frozen=2))
     mycc.kernel()
     myeom = continuum_orbital_eom(mycc)
-    myeom.kernel(nroots=7)
+    myeom.kernel(nroots=5)
     print(myeom.e)

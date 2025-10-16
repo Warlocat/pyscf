@@ -154,7 +154,20 @@ def kernel(mf, disp=1e-4, mo_rep=False):
         mat = np.einsum('xJ,xpq->Jpq', vec, vmat)
     else:
         mat = np.einsum('xJ,xspq->sJpq', vec, vmat)
-    return mat, omega
+    return mat, omega, hmat
+def kernel2(mf, disp=1e-4):
+    if not mf.converged: mf.kernel()
+    mo_coeff = np.asarray(mf.mo_coeff)
+    RESTRICTED= (mo_coeff.ndim==3)
+    cell = mf.cell
+    cells_a, cells_b = gen_cells(cell, disp/2.0) # generate a bunch of cells with disp/2 on each cartesian coord
+    mfset = run_mfs(mf, cells_a, cells_b) # run mean field calculations on all these cells
+    vmat = get_vmat(mf, mfset, disp) # extracting <u|dV|v>/dR
+    hmat = run_hess(mfset, disp)
+    omega, vec = solve_hmat(cell, hmat)
+    mass = cell.atom_mass_list() * MP_ME
+    vec = _freq_mass_weighted_vec(vec, omega, mass)
+    return vmat, omega, vec, hmat
 
 if __name__ == '__main__':
     cell = gto.Cell()
@@ -178,4 +191,4 @@ if __name__ == '__main__':
     mf.conv_tol_grad = 1e-8
     mf.kernel()
 
-    vmat, omega = kernel(mf, mo_rep=True)
+    vmat, omega = kernel(mf, mo_rep=False)

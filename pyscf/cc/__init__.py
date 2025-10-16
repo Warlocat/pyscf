@@ -74,6 +74,7 @@ from pyscf.cc import uccsd
 from pyscf.cc import gccsd
 from pyscf.cc import eom_rccsd
 from pyscf.cc import eom_rdcsd
+from pyscf.cc import eom_gdcsd
 from pyscf.cc import eom_uccsd
 from pyscf.cc import eom_gccsd
 from pyscf.cc import qcisd
