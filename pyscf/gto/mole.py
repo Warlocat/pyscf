@@ -2173,7 +2173,7 @@ def fromstring(string, format='xyz'):
 def is_au(unit):
     '''Return whether the unit is recognized as A.U. or not
     '''
-    return unit.upper().startswith(('B', 'AU'))
+    return isinstance(unit, str) and unit.upper().startswith(('B', 'AU'))
 
 #
 # MoleBase handles three layers of basis data: input, internal format, libcint arguments.
@@ -3066,16 +3066,36 @@ class MoleBase(lib.StreamObject):
     def set_geom_(self, atoms_or_coords, unit=None, symmetry=None,
                   inplace=True):
         '''Update geometry
+
+        Args:
+            atoms_or_coords : list, str, or numpy.ndarray
+                When specified in list or str, it is processed as the Mole.atom
+                attribute. If inputing a (N, 3) numpy array, this array
+                represents the coordinates of the atoms in the molecule.
+
+        Kwargs:
+            unit : str
+                The unit for the input `atoms_or_coords`. If specified, mol.unit
+                will be updated to this value. If not provided, the current
+                mol.unit will be used for the input `atoms_or_coords`.
+            symmetry : bool
+                Whether to enable point group symmetry. If not specified, the
+                current mol.symmetry setting will be used.
+            inplace : bool
+                Whether to overwrite the existing Mole object.
         '''
         if inplace:
             mol = self
         else:
             mol = self.copy(deep=False)
             mol._env = mol._env.copy()
-        if unit is None:
-            unit = mol.unit
-        else:
+
+        if unit is not None and self.unit != unit:
+            logger.warn(mol, 'Mole.unit (%s) is changed to %s', self.unit, unit)
             mol.unit = unit
+        else:
+            unit = mol.unit
+
         if symmetry is None:
             symmetry = mol.symmetry
 
@@ -3113,7 +3133,7 @@ class MoleBase(lib.StreamObject):
                 coordb = tuple(atom[1])
                 coords = coorda + coordb
                 logger.info(mol, ' %3d %-4s %16.12f %16.12f %16.12f AA  '
-                            '%16.12f %16.12f %16.12f Bohr\n',
+                            '%16.12f %16.12f %16.12f Bohr',
                             ia+1, mol.atom_symbol(ia), *coords)
         return mol
 
@@ -4279,13 +4299,14 @@ def bse_predefined_ecp(basis_name, elements):
                 ecp = basis_meta[0] # standard format basis set name
     return ecp, ecp_atoms
 
-def extract_pgto_params(mol, op='diffused'):
+def extract_pgto_params(mol, op='diffuse'):
     '''A helper function to extract exponents and contraction coefficients of
-    the most diffused or compact primitive GTOs for each shell. These exponents
+    the most diffuse or compact primitive GTOs for each shell. These exponents
     and coefficients are typically used in estimating rcut and Ecut for PBC
     methods.
     '''
-    if op != 'diffused' and op != 'compact':
+    op = op[:7] # in previous versions, op was spelled as diffused
+    if op != 'diffuse' and op != 'compact':
         raise RuntimeError(f'Unsupported operation {op}')
 
     e = np.hstack(mol.bas_exps())
@@ -4294,7 +4315,7 @@ def extract_pgto_params(mol, op='diffused'):
     l = np.repeat(mol._bas[:,ANG_OF], mol._bas[:,NPRIM_OF])
     basis_id = np.repeat(np.arange(mol.nbas), mol._bas[:,NPRIM_OF])
     precision = 1e-8
-    if op == 'diffused':
+    if op == 'diffuse':
         # A quick estimation for the radius that each primitive GTO decays to the
         # value smaller than the required precision
         r2 = np.log(c**2/precision * 10**l + 1e-200) / e
