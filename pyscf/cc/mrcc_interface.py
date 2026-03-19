@@ -202,7 +202,10 @@ def mrcc_interface(mf, method, frozen_core = 0, mol_sym = False, tol = 7, mem = 
     '''
     e_nuc = mf.energy_nuc()
     nelec = mf.mol.nelec[0] + mf.mol.nelec[1] - frozen_core*2
-    nmo = mf.mol.nao - frozen_core
+    if mf.mo_coeff.ndim == 2:
+        nmo = mf.mo_coeff.shape[1] - frozen_core
+    else:
+        nmo = mf.mo_coeff[0].shape[1] - frozen_core
     spin = mf.mol.spin
     nsing = ntrip = ndoub = 0
     if spin == 0:

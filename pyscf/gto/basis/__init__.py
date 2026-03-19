@@ -136,6 +136,7 @@ ALIAS = {
     'sto3g'      : 'sto-3g.dat'     ,
     'sto6g'      : 'sto-6g.dat'     ,
     'minao'      : 'minao'          ,
+    'minaop'      : 'minaop'          ,
     'dz'         : 'dz.dat'         ,
     'dzpdunning' : 'dzp_dunning'    ,
     'dzvp'       : 'dzvp.dat'       ,
