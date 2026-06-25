@@ -524,6 +524,53 @@ def eeccsd_matvec(eom, vector, imds=None, diag=None):
     vector = eom.amplitudes_to_vector(Hr1, Hr2)
     return vector
 
+def leeccsd_matvec(eom, vector, imds=None, diag=None):
+    '''EOM-EE-CCSD left eigenvector equation: L H_bar = omega L.
+
+    This is the same contraction as the ground state CCSD Lambda
+    equations. But the imds definition is different in PySCF'''
+    if imds is None: imds = eom.make_imds()
+    nocc = eom.nocc
+    nmo = eom.nmo
+    l1, l2 = eom.vector_to_amplitudes(vector, nmo, nocc)
+    t2 = imds.t2
+
+    # singles
+    Hl1  = lib.einsum('ia,ae->ie', l1, imds.Fvv)
+    Hl1 -= lib.einsum('mi,ia->ma', imds.Foo, l1)
+    Hl1 += lib.einsum('maei,ia->me', imds.Wovvo, l1)
+    Hl1 -= 0.5*lib.einsum('ijab,mbij->ma', l2, imds.Wovoo)
+    Hl1 -= 0.5*lib.einsum('ijab,amef,ijfb->me', l2, imds.Wvovv, t2)
+    Hl1 += 0.5*lib.einsum('ijab,abej->ie', l2, imds.Wvvvo)
+    Hl1 += 0.5*lib.einsum('ijab,mnie,njab->me', l2, imds.Wooov, t2)
+
+    # doubles
+    Hl2 = np.zeros_like(l2)
+    tmp = lib.einsum('be,ijab->ijae', imds.Fvv, l2)
+    Hl2 += tmp - tmp.transpose(0,1,3,2)
+    tmp = lib.einsum('mj,ijab->imab', -imds.Foo, l2)
+    Hl2 += tmp - tmp.transpose(1,0,2,3)
+    tmp = lib.einsum('mbej,ijab->imae', imds.Wovvo, l2)
+    tmp = tmp - tmp.transpose(1,0,2,3)
+    tmp = tmp - tmp.transpose(0,1,3,2)
+    Hl2 += tmp
+    Hl2 += 0.5*lib.einsum('mnij,ijab->mnab', imds.Woooo, l2)
+    Hl2 += 0.5*lib.einsum('abef,ijab->ijef', imds.Wvvvv, l2)
+    tmp = -0.5*lib.einsum('mnef,ijae,ijab->mnbf', imds.Woovv, t2, l2)
+    Hl2 += tmp - tmp.transpose(0,1,3,2)
+    tmp = -0.5*lib.einsum('mnef,imab,ijab->jnef', imds.Woovv, t2, l2)
+    Hl2 += tmp - tmp.transpose(1,0,2,3)
+    tmp = lib.einsum('ia,jb->ijab', l1, imds.Fov)
+    tmp = tmp - tmp.transpose(1,0,2,3)
+    Hl2 += tmp - tmp.transpose(0,1,3,2)
+    tmp = lib.einsum('ka,ijkb->ijab', l1, imds.Wooov)
+    Hl2 -= tmp - tmp.transpose(0,1,3,2)
+    tmp = lib.einsum('ic,cjab->ijab', l1, imds.Wvovv)
+    Hl2 += tmp - tmp.transpose(1,0,2,3)
+
+    vector = eom.amplitudes_to_vector(Hl1, Hl2)
+    return vector
+
 def eeccsd_diag(eom, imds=None):
     if imds is None: imds = eom.make_imds()
     t1, t2 = imds.t1, imds.t2
@@ -560,7 +607,8 @@ def eeccsd_diag(eom, imds=None):
     return vector
 
 
-def eeccsd(eom, nroots=1, koopmans=False, guess=None, eris=None, imds=None):
+def eeccsd(eom, nroots=1, koopmans=False, guess=None, left=False, eris=None,
+           imds=None):
     '''Calculate N-electron neutral excitations via EOM-EE-CCSD.
 
     Kwargs:
@@ -571,8 +619,11 @@ def eeccsd(eom, nroots=1, koopmans=False, guess=None, eris=None, imds=None):
             overlap.
         guess : list of ndarray
             List of guess vectors to use for targeting via overlap.
+        left : bool
+            Whether to solve the left eigenvector equation (L H_bar = omega L).
     '''
-    return eom_rccsd.eomee_ccsd_singlet(eom, nroots, koopmans, guess, eris, imds)
+    return eom_rccsd.eomee_ccsd_singlet(eom, nroots, koopmans, guess, eris, imds,
+                                        left=left)
 
 
 class EOMEE(eom_rccsd.EOMEE):
@@ -580,12 +631,16 @@ class EOMEE(eom_rccsd.EOMEE):
     kernel = eeccsd
     eeccsd = eeccsd
     matvec = eeccsd_matvec
+    l_matvec = leeccsd_matvec
     get_diag = eeccsd_diag
 
-    def gen_matvec(self, imds=None, **kwargs):
+    def gen_matvec(self, imds=None, left=False, **kwargs):
         if imds is None: imds = self.make_imds()
         diag = self.get_diag(imds)
-        matvec = lambda xs: [self.matvec(x, imds) for x in xs]
+        if left:
+            matvec = lambda xs: [self.l_matvec(x, imds) for x in xs]
+        else:
+            matvec = lambda xs: [self.matvec(x, imds) for x in xs]
         return matvec, diag
 
     amplitudes_to_vector = staticmethod(amplitudes_to_vector_ee)

@@ -20,6 +20,7 @@
 
 
 import numpy as np
+from functools import reduce
 
 from pyscf import lib
 from pyscf import ao2mo
@@ -1073,11 +1074,12 @@ def eeccsd(eom, nroots=1, koopmans=False, guess=None, eris=None, imds=None):
 
 
 def eomee_ccsd_singlet(eom, nroots=1, koopmans=False, guess=None,
-                       eris=None, imds=None, diag=None):
+                       eris=None, imds=None, diag=None, left=False):
     '''EOM-EE-CCSD singlet
     '''
     eom.converged, eom.e, eom.v \
-            = kernel(eom, nroots, koopmans, guess, eris=eris, imds=imds, diag=diag)
+            = kernel(eom, nroots, koopmans, guess, left=left, eris=eris,
+                     imds=imds, diag=diag)
     return eom.e, eom.v
 
 def eomee_ccsd_triplet(eom, nroots=1, koopmans=False, guess=None,
@@ -1181,8 +1183,10 @@ def spatial2spin_triplet(rx, orbspin=None):
         r1 = (r1a, r1a)
         return eom_uccsd.spatial2spin_eomee(r1, orbspin)
     else:
-        r2ab = rx * .5**.5
+        # NB: the original line ``r2ab = rx * .5**.5`` raised a TypeError because
+        # ``rx`` is the (r2aa, r2ab) tuple -- unpack first, then scale.
         r2aa, r2ab = rx
+        r2ab = r2ab * .5**.5
         r2aa = r2ab - r2ab.transpose(1,0,2,3)
         r2 = (r2aa, r2ab, -r2aa)
         return eom_uccsd.spatial2spin_eomee(r2, orbspin)
@@ -1283,6 +1287,127 @@ def eeccsd_matvec_singlet(eom, vector, imds=None):
     Hr2 = Hr2 + Hr2.transpose(1,0,3,2)
     vector = eom.amplitudes_to_vector(Hr1, Hr2)
     return vector
+
+
+def _make_ee_lambda_imds(eom, imds):
+    '''ccsd_lambda intermediates used by the EE-singlet left matvec, cached on the
+    EOM `imds` object (built once per diagonalization).
+
+    The left equation (L H_bar = omega L) is the homogeneous part of the closed-shell
+    CC Lambda equation, which is expressed in the ccsd_lambda intermediate "dialect"
+    (w1=Lvv, w2=Loo, w4=Fov, woooo=Woooo, wVOov=Wovvo, wvOOv=-Wovov, plus the
+    left-specific wvooo, wvvov, w3) -- a different set from the make_ee right-hand
+    intermediates, so these are genuinely needed and built only here.  They reuse the
+    SAME eris already held by `imds` (imds.eris), i.e. no duplicate ao2mo.'''
+    limds = getattr(imds, '_lambda_imds', None)
+    if limds is None:
+        from pyscf.cc import ccsd_lambda
+        cc = eom._cc
+        limds = imds._lambda_imds = ccsd_lambda.make_intermediates(
+            cc, cc.t1, cc.t2, imds.eris)
+    return limds
+
+def leeccsd_matvec_singlet(eom, vector, imds=None, diag=None):
+    '''RHF singlet EOM-EE left eigenvector matvec, L H_bar = omega L.
+
+    This is the homogeneous (Lambda-dependent) part of the closed-shell CC Lambda
+    equation -- the same operator as the (metric-weighted) transpose of
+    eeccsd_matvec_singlet.  It shares the eris held by the right-hand EOM `imds`
+    (no second integral transform); the ccsd_lambda intermediates it needs are
+    built once and cached on that same imds.  For args, see eeccsd_matvec_singlet.'''
+    from pyscf.cc import _ccsd
+    cc = eom._cc
+    t1, t2 = cc.t1, cc.t2
+    nocc, nvir = t1.shape
+    nmo = nocc + nvir
+    if imds is None:
+        imds = eom.make_imds()
+    eris = imds.eris
+    limds = _make_ee_lambda_imds(eom, imds)
+    l1, l2 = eom.vector_to_amplitudes(vector, nmo, nocc)
+
+    theta = t2*2 - t2.transpose(0,1,3,2)
+    mba = lib.einsum('klca,klcb->ba', l2, theta)
+    mij = lib.einsum('ikcd,jkcd->ij', l2, theta)
+    mba1 = np.einsum('jc,jb->bc', l1, t1) + mba
+    mij1 = np.einsum('kb,jb->kj', l1, t1) + mij
+    mia1 = np.einsum('kc,jkbc->jb', l1, t2) * 2
+    mia1 -= np.einsum('kc,jkcb->jb', l1, t2)
+    mia1 -= reduce(np.dot, (t1, l1.T, t1))
+    mia1 -= np.einsum('bd,jd->jb', mba, t1)
+    mia1 -= np.einsum('lj,lb->jb', mij, t1)
+
+    l2new = cc._add_vvvv(None, l2, eris, with_ovvv=False, t2sym='jiba')
+    l1new = np.einsum('ijab,jb->ia', l2new, t1) * 2
+    l1new -= np.einsum('jiab,jb->ia', l2new, t1)
+    l2new *= .5
+
+    w1 = limds.w1
+    w2 = limds.w2
+    l1new += np.einsum('ib,ba->ia', l1, w1)
+    l1new -= np.einsum('ja,ij->ia', l1, w2)
+    l1new -= np.einsum('ik,ka->ia', mij, limds.w4)
+    l1new -= np.einsum('ca,ic->ia', mba, limds.w4)
+    l1new += np.einsum('ijab,bj->ia', l2, limds.w3) * 2
+    l1new -= np.einsum('ijba,bj->ia', l2, limds.w3)
+
+    l2new += np.einsum('ia,jb->ijab', l1, limds.w4)
+    l2new += lib.einsum('jibc,ca->jiba', l2, w1)
+    l2new -= lib.einsum('jk,kiba->jiba', w2, l2)
+
+    eris_ovoo = np.asarray(eris.ovoo)
+    l1new -= np.einsum('iajk,kj->ia', eris_ovoo, mij1) * 2
+    l1new += np.einsum('jaik,kj->ia', eris_ovoo, mij1)
+    l2new -= lib.einsum('jbki,ka->jiba', eris_ovoo, l1)
+
+    tau = _ccsd.make_tau(t2, t1, t1)
+    l2tau = lib.einsum('ijcd,klcd->ijkl', l2, tau)
+    l2t1 = lib.einsum('jidc,kc->ijkd', l2, t1)
+
+    l1new -= np.einsum('jb,jiab->ia', l1, np.asarray(eris.oovv))
+    for p0, p1 in lib.prange(0, nvir, nvir):
+        eris_ovvv = eris.get_ovvv(slice(None), slice(p0,p1))
+        l1new[:,p0:p1] += np.einsum('iabc,bc->ia', eris_ovvv, mba1) * 2
+        l1new -= np.einsum('ibca,bc->ia', eris_ovvv, mba1[p0:p1])
+        l2new[:,:,p0:p1] += lib.einsum('jbac,ic->jiba', eris_ovvv, l1)
+        m4 = lib.einsum('ijkd,kadb->ijab', l2t1, eris_ovvv)
+        l2new[:,:,p0:p1] -= m4
+        l1new[:,p0:p1] -= np.einsum('ijab,jb->ia', m4, t1) * 2
+        l1new -= np.einsum('ijab,ia->jb', m4, t1[:,p0:p1]) * 2
+        l1new[:,p0:p1] += np.einsum('jiab,jb->ia', m4, t1)
+        l1new += np.einsum('jiab,ia->jb', m4, t1[:,p0:p1])
+
+        eris_voov = np.asarray(eris.ovvo[:,p0:p1]).transpose(1,0,3,2)
+        l1new[:,p0:p1] += np.einsum('jb,aijb->ia', l1, eris_voov) * 2
+        l2new[:,:,p0:p1] -= lib.einsum('bjic,ca->jiba', eris_voov, mba1)
+        l2new[:,:,p0:p1] -= lib.einsum('bjka,ik->jiba', eris_voov, mij1)
+        l1new[:,p0:p1] += np.einsum('aijb,jb->ia', eris_voov, mia1) * 2
+        l1new -= np.einsum('bija,jb->ia', eris_voov, mia1[:,p0:p1])
+        m4 = lib.einsum('ijkl,aklb->ijab', l2tau, eris_voov)
+        l2new[:,:,p0:p1] += m4 * .5
+        l1new[:,p0:p1] += np.einsum('ijab,jb->ia', m4, t1) * 2
+        l1new -= np.einsum('ijba,jb->ia', m4, t1[:,p0:p1])
+
+        l1new -= lib.einsum('ckij,jkca->ia', np.asarray(limds.wvooo[p0:p1]),
+                            l2[:,:,p0:p1])
+        l1new[:,p0:p1] += lib.einsum('abkc,kibc->ia', np.asarray(limds.wvvov[p0:p1]),
+                                     l2)
+
+        wvOOv = np.asarray(limds.wvOOv[p0:p1])
+        tmp_voov = np.asarray(limds.wVOov[p0:p1]) * 2 + wvOOv
+        tmp = l2.transpose(0,2,1,3) - l2.transpose(0,3,1,2) * .5
+        l2new[:,:,p0:p1] += lib.einsum('iakc,bjkc->jiba', tmp, tmp_voov)
+        tmp = lib.einsum('jkca,bikc->jiba', l2, wvOOv)
+        l2new[:,:,p0:p1] += tmp
+        l2new[:,:,p0:p1] += tmp.transpose(1,0,2,3) * .5
+
+    m3 = lib.einsum('ijkl,klab->ijab', np.asarray(limds.woooo), l2)
+    l2new += m3 * .5
+    l1new += np.einsum('ijab,jb->ia', m3, t1) * 2
+    l1new -= np.einsum('ijba,jb->ia', m3, t1)
+
+    l2new = l2new + l2new.transpose(1,0,3,2)
+    return eom.amplitudes_to_vector(l1new, l2new)
 
 def eeccsd_matvec_triplet(eom, vector, imds=None):
     if imds is None: imds = eom.make_imds()
@@ -1713,14 +1838,18 @@ class EOMEESinglet(EOMEE):
     kernel = eomee_ccsd_singlet
     eomee_ccsd_singlet = eomee_ccsd_singlet
     matvec = eeccsd_matvec_singlet
+    l_matvec = leeccsd_matvec_singlet
 
     def get_diag(self, imds=None):
         return eeccsd_diag(self, imds=None)[0]
 
-    def gen_matvec(self, imds=None, diag=None, **kwargs):
+    def gen_matvec(self, imds=None, diag=None, left=False, **kwargs):
         if imds is None: imds = self.make_imds()
         if diag is None: diag = self.get_diag(imds)
-        matvec = lambda xs: [self.matvec(x, imds) for x in xs]
+        if left:
+            matvec = lambda xs: [self.l_matvec(x, imds) for x in xs]
+        else:
+            matvec = lambda xs: [self.matvec(x, imds) for x in xs]
         return matvec, diag
 
     amplitudes_to_vector = staticmethod(amplitudes_to_vector_singlet)
