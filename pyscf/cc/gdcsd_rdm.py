@@ -25,8 +25,22 @@ from pyscf.cc import gdcsd, gccsd_rdm
 einsum = lib.einsum
 
 def _gamma2_intermediates(mycc, t1, t2, l1, l2):
-    assert hasattr(mycc, "p_mu"), "DCSD two-particle density matrices are not well-defined"
-    tau = t2 + einsum('ia,jb->ijab', t1, t1) * 2
+    # The four quadratic-T2 diagrams of the doubles residual are scaled in pCCSD/DCSD;
+    # this scaling carries into the ovov (dovov) block of the 2-RDM only (verified by
+    # finite difference).  alpha->C, beta->A, gamma->B, delta->D(ring).
+    if hasattr(mycc, "p_mu"):              # pCCSD
+        alpha = mycc.p_sigma
+        beta  = (1.0 + mycc.p_mu) / 2.0
+        gamma = mycc.p_mu
+        delta = mycc.p_sigma
+        dcsd_ring = False
+    else:                                  # DCSD: (alpha,beta,gamma,delta)=(.5,.5,0,1),
+        alpha = beta = 0.5                 # and the ring (D) is Coulomb-only.
+        gamma = 0.0
+        delta = 1.0
+        dcsd_ring = True
+    t1t1 = einsum('ia,jb->ijab', t1, t1) * 2
+    tau = t2 + t1t1
     miajb = einsum('ikac,kjcb->iajb', l2, t2)
 
     goovv = 0.25 * (l2.conj() + tau)
@@ -36,19 +50,17 @@ def _gamma2_intermediates(mycc, t1, t2, l1, l2):
     goovv += einsum('cb,ijca->ijab', tmp, t2) * .5
     tmp = einsum('kc,jc->kj', l1, t1)
     goovv += einsum('kiab,kj->ijab', tau, tmp) * .5
-    tmp = numpy.einsum('ldjd->lj', miajb)
-    tau_p = t2 * (0.5+0.5*mycc.p_mu) + einsum('ia,jb->ijab', t1, t1) * 2
-    goovv -= einsum('lj,liba->ijab', tmp, tau_p) * .25
-    tmp = numpy.einsum('ldlb->db', miajb)
-    tau_p = t2 * mycc.p_sigma + einsum('ia,jb->ijab', t1, t1) * 2
-    goovv -= einsum('db,jida->ijab', tmp, tau_p) * .25
-    tau_p = t2 * mycc.p_sigma + einsum('ia,jb->ijab', t1, t1) * 2
-    goovv -= einsum('ldia,ljbd->ijab', miajb, tau_p) * .5
-    tmp = einsum('klcd,ijcd->ijkl', l2, tau) * .25**2
+    tmp = numpy.einsum('ldjd->lj', miajb)              # A diagram (beta)
+    goovv -= einsum('lj,liba->ijab', tmp, t2 * beta + t1t1) * .25
+    tmp = numpy.einsum('ldlb->db', miajb)              # C diagram (alpha)
+    goovv -= einsum('db,jida->ijab', tmp, t2 * alpha + t1t1) * .25
+    # D diagram (ring): the t1t1 part is assembled antisymmetrically here; for DCSD the
+    # t2 part is Coulomb-only and added to dovov directly below.
+    tau_ring = t1t1 if dcsd_ring else (t2 * delta + t1t1)
+    goovv -= einsum('ldia,ljbd->ijab', miajb, tau_ring) * .5
+    tmp = einsum('klcd,ijcd->ijkl', l2, tau) * .25**2  # ladder output leg (unscaled)
     goovv += einsum('ijkl,ka,lb->ijab', tmp, t1, t1) * 2
-
-    tau_p = t2 * mycc.p_mu + einsum('ia,jb->ijab', t1, t1) * 2
-    tmp = einsum('klcd,ijcd->ijkl', l2, tau_p) * .25**2
+    tmp = einsum('klcd,ijcd->ijkl', l2, t2 * gamma + t1t1) * .25**2   # B ladder (gamma)
     goovv += einsum('ijkl,klab->ijab', tmp, t2)
     goovv = goovv.conj()
 
@@ -76,6 +88,9 @@ def _gamma2_intermediates(mycc, t1, t2, l1, l2):
     govvv += einsum('ijbc,ja->iabc', l2, t1) * .25
 
     dovov = goovv.transpose(0,2,1,3) - goovv.transpose(0,3,1,2)
+    if dcsd_ring:        # Coulomb-only ring: add t2 part as direct (no exchange transpose)
+        gring = (-einsum('ldia,ljbd->ijab', miajb, t2) * .5).conj()
+        dovov += gring.transpose(0,2,1,3)
     dvvvv = gvvvv.transpose(0,2,1,3) - gvvvv.transpose(0,3,1,2)
     doooo = goooo.transpose(0,2,1,3) - goooo.transpose(0,3,1,2)
     dovvv = govvv.transpose(0,2,1,3) - govvv.transpose(0,3,1,2)

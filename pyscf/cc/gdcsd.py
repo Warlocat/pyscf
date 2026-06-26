@@ -239,16 +239,6 @@ class GDCSD(gccsd.GCCSD):
         super().__init__(mf, frozen, mo_coeff, mo_occ)
         self.oovv_phys = _make_eris_phys_incore(self).oovv
 
-class pGCCSD(GDCSD):
-    p_mu = -1.0
-    p_sigma = 1.0
-    update_amps = update_amps
-    def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None, mu=None, sigma=None):
-        super().__init__(mf, frozen, mo_coeff, mo_occ)
-        if mu is not None:
-            self.p_mu = mu
-        if sigma is not None:
-            self.p_sigma = sigma
     def solve_lambda(self, t1=None, t2=None, l1=None, l2=None,
                      eris=None):
         from pyscf.cc import gdcsd_lambda
@@ -307,7 +297,26 @@ class pGCCSD(GDCSD):
 
     def make_rdm2(self, t1=None, t2=None, l1=None, l2=None, ao_repr=False,
                   with_frozen=True, with_dm1=True):
-        raise NotImplementedError
+        '''Un-relaxed 2-particle density matrix in MO space'''
+        from pyscf.cc import gdcsd_rdm
+        if t1 is None: t1 = self.t1
+        if t2 is None: t2 = self.t2
+        if l1 is None: l1 = self.l1
+        if l2 is None: l2 = self.l2
+        if l1 is None: l1, l2 = self.solve_lambda(t1, t2)
+        return gdcsd_rdm.make_rdm2(self, t1, t2, l1, l2, ao_repr=ao_repr,
+                                   with_frozen=with_frozen, with_dm1=with_dm1)
+
+class pGCCSD(GDCSD):
+    p_mu = -1.0
+    p_sigma = 1.0
+    update_amps = update_amps
+    def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None, mu=None, sigma=None):
+        super().__init__(mf, frozen, mo_coeff, mo_occ)
+        if mu is not None:
+            self.p_mu = mu
+        if sigma is not None:
+            self.p_sigma = sigma
     
 
 class GDCD(GDCSD):

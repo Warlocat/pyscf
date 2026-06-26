@@ -25,8 +25,6 @@ from pyscf.cc import ccsd, ccsd_rdm, dcsd
 
 def _gamma2_outcore(mycc, t1, t2, l1, l2, h5fobj, compress_vvvv=False):
     p_alpha, p_beta, p_gamma, p_delta, is_dcsd = dcsd.cc_parameter(mycc)
-    if is_dcsd:
-        raise NotImplementedError
     log = logger.Logger(mycc.stdout, mycc.verbose)
     nocc, nvir = t1.shape
     nvir_pair = nvir * (nvir+1) //2
@@ -118,12 +116,19 @@ def _gamma2_outcore(mycc, t1, t2, l1, l2, h5fobj, compress_vvvv=False):
         doovv[:,:,p0:p1] = (-2*gOvvO - govVO).transpose(3,0,1,2).conj()
         gOvvO = govVO = None
         if is_dcsd:
-            # Something wrong here
+            # DCSD Coulomb-only ring (derived and validated against finite difference).
+            # goovv is assembled as 2J-K (transpose*2 - transpose); goovv_dcsd as 2J (Coulomb,
+            # transpose*2) below.  The t1*t1 ring goes fully into goovv (2J-K).  For the t2 ring:
+            #   R1 = einsum('dlib,jlda', pvOOv, t2)  -> exchange-only: +.5 in goovv, -.5 in goovv_dcsd
+            #   R2 = einsum('dlia,jldb', pvoOV, t2)  -> direct-only, weight .5 (goovv_dcsd)
+            #   R3 = einsum('dlia,jlbd', pvoOV+pvOOv/2, t2) -> direct, weight 1 (goovv_dcsd)
             for q0, q1 in lib.prange(0, nvir, blksize):
                 goovv[:,:,q0:q1,:] += lib.einsum('dlib,jd,la->ijab', pvOOv, t1[:,p0:p1], t1[:,q0:q1]).conj()
                 goovv[:,:,:,q0:q1] -= lib.einsum('dlia,jd,lb->ijab', pvoOV, t1[:,p0:p1], t1[:,q0:q1]).conj()
-                goovv_dcsd[:,:,q0:q1,:] += lib.einsum('dlib,jlda->ijab', pvOOv, t2[:,:,p0:p1,q0:q1]).conj()
-                goovv_dcsd[:,:,:,q0:q1] -= lib.einsum('dlia,jldb->ijab', pvoOV, t2[:,:,p0:p1,q0:q1]).conj()
+                r1 = lib.einsum('dlib,jlda->ijab', pvOOv, t2[:,:,p0:p1,q0:q1]).conj()
+                goovv[:,:,q0:q1,:] += r1 * .5
+                goovv_dcsd[:,:,q0:q1,:] -= r1 * .5
+                goovv_dcsd[:,:,:,q0:q1] -= lib.einsum('dlia,jldb->ijab', pvoOV, t2[:,:,p0:p1,q0:q1]).conj() * .5
                 tmp = pvoOV[:,:,:,q0:q1] + pvOOv[:,:,:,q0:q1]*.5
                 goovv_dcsd[:,:,q0:q1,:] += lib.einsum('dlia,jlbd->ijab', tmp, t2[:,:,:,p0:p1]).conj()
         else:
